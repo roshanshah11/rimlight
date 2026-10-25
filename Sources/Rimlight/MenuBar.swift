@@ -6,10 +6,13 @@ import RimlightCore
 final class MenuBar: NSObject, NSMenuDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let engine: Engine
+    private let updater: Updater
 
-    init(engine: Engine) {
+    init(engine: Engine, updater: Updater) {
         self.engine = engine
+        self.updater = updater
         super.init()
+        SpotifyExtension.refresh()
         let img = NSImage(systemSymbolName: "rays", accessibilityDescription: "Rimlight")
         img?.isTemplate = true
         item.button?.image = img
@@ -22,6 +25,7 @@ final class MenuBar: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let s = engine.settings
+        SpotifyExtension.refresh()
 
         menu.addItem(info(engine.nowPlayingLine))
         if s.enabled, engine.songLine != nil { menu.addItem(info(lookSummary(s))) }
@@ -51,6 +55,9 @@ final class MenuBar: NSObject, NSMenuDelegate {
         let more = NSMenuItem(title: "More", action: nil, keyEquivalent: "")
         more.submenu = moreMenu(s)
         menu.addItem(more)
+        if let r = updater.available {
+            menu.addItem(ActionItem(title: "Update to Rimlight \(r.version)…") { [weak self] in self?.updater.openDownload() })
+        }
         menu.addItem(ActionItem(title: "About Rimlight") {
             NSApp.activate()
             NSApp.orderFrontStandardAboutPanel(options: [
@@ -102,13 +109,27 @@ final class MenuBar: NSObject, NSMenuDelegate {
             m.addItem(toggle("Lyrics line on the screen", s.lyrics) { $0.lyrics.toggle() })
         }
         m.addItem(.separator())
+        m.addItem(spotifyExtensionItem())
+        m.addItem(.separator())
         let login = ActionItem(title: "Open at login") { [weak self] in
             LoginItem.set(!LoginItem.enabled)
             self?.engine.onChange?()
         }
         login.state = LoginItem.enabled ? .on : .off
         m.addItem(login)
+        m.addItem(toggle("Check for updates", s.checkForUpdates) { $0.checkForUpdates.toggle() })
         return m
+    }
+
+    /// On, waiting for Spotify to start, or an offer to add (or update) it.
+    private func spotifyExtensionItem() -> NSMenuItem {
+        let state = SpotifyExtension.cached
+        if state == .outdated {
+            return ActionItem(title: "Update Rimlight's Spotify extension…") { SpotifyExtension.offerInstall() }
+        }
+        if engine.bridgeConnected { return info("Spotify extension: on") }
+        if state == .installed { return info("Spotify extension: on when Spotify next starts") }
+        return ActionItem(title: "Add Rimlight's extension to Spotify…") { SpotifyExtension.offerInstall() }
     }
 
     private func info(_ text: String) -> NSMenuItem {

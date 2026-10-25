@@ -11,7 +11,7 @@ Each song gets a style, judged from its first bars of music (`StyleJudge`: felt 
 carries, whether a kick lands on every beat), and logged with its evidence to
 `~/Library/Application Support/Rimlight/songs.jsonl`:
 - **Club** (a kick on every beat at house tempo): builds, the blackout, the drop's white hit, chases.
-- **Rap** (most of what he plays, and pop): the hook is the big look, found from the synced lyrics (`HookFinder`: the
+- **Rap** (most hip-hop, and pop): the hook is the big look, found from the synced lyrics (`HookFinder`: the
   block of lines that comes back); verses are calm pools with no chase; the hits follow the 808s and claps as they're
   heard; the beat cutting out under the voice dims the rim, and coming back is a hit; only real silences go dark.
 - **Ambiance** (slow songs whose bass doesn't dominate): a wash in the cover's colors that breathes over two bars and
@@ -19,7 +19,9 @@ carries, whether a kick lands on every beat), and logged with its evidence to
 
 A verdict only moves up (ambiance, rap, club) and starts from the last song's.
 
-Research behind the rules: `~/roshan/Learning/Research/2026-10-24-dj-lighting-rimlight/answer.md`.
+Where the rules come from: SoundSwitch's phrase labels (Intro, Main, Bridge, Outro), lighting designers counting
+out eight bars and marking the changes, and Scott Lawson's finding on audio-reactive LEDs that a fixed threshold
+either saturates or barely flickers (https://scottlawsonbc.com/post/audio-led).
 
 ## Build and run on this Mac
 
@@ -52,7 +54,7 @@ Everything runs on "sound time": the host time the tapped app played each sample
 - **Per song**: Spotify's map sits differently on each song's hits (-50 to +57 ms on eight songs, 2026-10-24/25), the
   same on the Beats and the speakers, so the correction is learned per song: the strong hits are folded onto half a
   beat (beats and off-beats alike, so a trap clap on the "and" can't pull it half a beat out) and the pile nearest the
-  songs' running average wins. Replayed on four of his songs (Fixtures/onsets-2026-10-25.json) each settles within
+  songs' running average wins. Replayed on four real songs (Fixtures/onsets-2026-10-25.json) each settles within
   2 ms of its drums in 20-52 s; a song not settled after 15 s is lit from the live clock meanwhile. In rap, a heard hit
   is lit only if it lands on a 16th of the settled beat (10-44% of the hits on those songs didn't: voices and synths).
 - **Screens**: each frame is drawn for when it reaches the screen (when Metal says it was presented, measured per
@@ -73,7 +75,7 @@ the planned drop's white hit on the exact frame of the downbeat; the live one a 
 
 ## Checks
 
-- `swift test -c release`: 78 tests, including timing against the synthetic track, the three styles on synthetic club, trap and
+- `swift test -c release`: 80 tests, including timing against the synthetic track, the three styles on synthetic club, trap and
   ballad tracks, and the song plan on three real Spotify analyses (Fixtures/).
 - `rimlight debug-video out.mp4 [--live] [--cover image] [--song club|trap|ballad]`: a synthetic track through the
   show, with its audio.

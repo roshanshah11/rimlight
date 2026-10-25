@@ -1,0 +1,16 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Build the app
+        run: swift build -c release --product Rimlight
+      - name: Tests
+        run: swift test -c release

@@ -18,6 +18,7 @@ public enum Command: Equatable, Sendable {
            rimlight brightness 0-100 | strength 0-100 | glow <pt> | thickness <pt>
            rimlight lyrics on|off | offset <ms>
            rimlight calibrate   (line the light up with your current speakers or headphones)
+           rimlight check-update | spotify-extension
            rimlight debug-render <file.png>
     """
 

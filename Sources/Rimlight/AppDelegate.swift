@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var engine: Engine?
     private var menuBar: MenuBar?
     private var welcome: Welcome?
+    private let updater = Updater()
 
     func applicationDidFinishLaunching(_ note: Notification) {
         if let id = Bundle.main.bundleIdentifier,
@@ -16,7 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let e = try Engine()
             e.start()
             engine = e
-            menuBar = MenuBar(engine: e)
+            menuBar = MenuBar(engine: e, updater: updater)
+            updater.start { [weak e] in e?.settings.checkForUpdates ?? false }
             if !e.settings.welcomed { showWelcome(e) }
         } catch {
             NSLog("Rimlight cannot start: \(error)")

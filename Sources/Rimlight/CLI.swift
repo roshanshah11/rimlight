@@ -13,6 +13,8 @@ enum CLI {
 
     static func run(_ args: [String]) -> Int32 {
         if ["version", "--version", "-v"].contains(args.first ?? "") { print("Rimlight \(version)"); return 0 }
+        if args.first == "spotify-extension" { print(SpotifyExtension.state); return 0 }
+        if args.first == "check-update" { return checkUpdate() }
         if args.first == "debug-welcome", args.count >= 2 { return debugWelcome(to: args[1]) ? 0 : 1 }
         if args.first == "debug-tap-level" { return debugTapLevel(seconds: Double(args.dropFirst().first ?? "") ?? 3) }
         if args.first == "palette", args.count >= 3 { return paletteSheet(out: args[1], images: Array(args.dropFirst(2))) ? 0 : 1 }
@@ -77,16 +79,41 @@ enum CLI {
         return 0
     }
 
-    /// "1.0.0 (57)" from the app's Info.plist; the CLI runs as the app's own binary (~/bin/rimlight links to it).
-    static var version: String {
+    /// The app's Info.plist: the CLI runs as the app's own binary (~/bin/rimlight links to it).
+    static var appInfo: [String: Any] {
+        if Bundle.main.infoDictionary?["CFBundleShortVersionString"] != nil { return Bundle.main.infoDictionary ?? [:] }
         var buf = [CChar](repeating: 0, count: 4096)
         let path = proc_pidpath(getpid(), &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : CommandLine.arguments[0]
-        let exe = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-        let plist = exe.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Info.plist")
-        let info = Bundle.main.infoDictionary?["CFBundleShortVersionString"] != nil ? Bundle.main.infoDictionary
-            : NSDictionary(contentsOf: plist) as? [String: Any]
-        guard let v = info?["CFBundleShortVersionString"] as? String else { return "(not in an app bundle)" }
-        return info?["CFBundleVersion"].map { "\(v) (\($0))" } ?? v
+        let plist = URL(fileURLWithPath: path).resolvingSymlinksInPath().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Info.plist")
+        return NSDictionary(contentsOf: plist) as? [String: Any] ?? [:]
+    }
+
+    /// "1.0.0 (57)".
+    static var version: String {
+        guard let v = appInfo["CFBundleShortVersionString"] as? String else { return "(not in an app bundle)" }
+        return appInfo["CFBundleVersion"].map { "\(v) (\($0))" } ?? v
+    }
+
+    /// `rimlight check-update`: the latest release on GitHub against this one, what the menu would offer.
+    static func checkUpdate() -> Int32 {
+        let info = appInfo
+        guard let repo = info["RimlightUpdateRepo"] as? String, let current = info["CFBundleShortVersionString"] as? String,
+              let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else {
+            print("not in an app bundle"); return 1
+        }
+        let done = DispatchSemaphore(value: 0)
+        var line = "no answer from GitHub"
+        URLSession.shared.dataTask(with: url) { data, response, _ in
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200, let data, let r = GitHubRelease.parse(data) {
+                line = "latest \(r.version), this \(current): " + (Version.isNewer(r.version, than: current) ? "update available, \(r.download ?? r.page)" : "up to date")
+            } else if code != 0 { line = "GitHub answered \(code) for \(repo) (no public release yet?)" }
+            done.signal()
+        }.resume()
+        _ = done.wait(timeout: .now() + 20)
+        print(line)
+        return 0
     }
 
     /// The welcome window, drawn offscreen to a PNG (checks its layout without showing it).

@@ -11,6 +11,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Rimlight"
 cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp "$ROOT/spicetify/rimlight-bridge.js" "$APP/Contents/Resources/rimlight-bridge.js"   # the menu's Spotify extension
 sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD/" "$ROOT/Resources/Info.plist" > "$APP/Contents/Info.plist"
 plutil -lint -s "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"

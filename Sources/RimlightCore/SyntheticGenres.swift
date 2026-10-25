@@ -128,7 +128,7 @@ final class Synth {
     }
 }
 
-/// A rap track, the shape of most of what he plays (Drake, DDG, EsDeeKid): 150 BPM as Spotify counts it, a
+/// A rap track, the shape of most current rap (Drake, DDG, EsDeeKid): 150 BPM as Spotify counts it, a
 /// half-time feel (clap on 3), syncopated 808s, 8th hats with rolls. 4 bars of intro (keys only), a 16-bar verse
 /// whose last two beats drop the beat out, an 8-bar hook (a lead and a doubled voice on top, harder 808s), an 8-bar
 /// second verse that ends in two beats of silence, an 8-bar beat switch (new pattern, new chords), 4 bars of outro.

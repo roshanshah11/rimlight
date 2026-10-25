@@ -108,7 +108,7 @@ final class CalibrationTests: XCTestCase {
         XCTAssertEqual(StreamSync.hold(from: Data(big.utf8), now: 101), 0.4, "clamped")
     }
 
-    /// The songs he played on 2026-10-25, as the tap heard them through the Beats. Each settles on its drums
+    /// Four rap songs played on 2026-10-25, as the tap heard them through the Beats. Each settles on its drums
     /// (where the hits pile up in 20 s stretches of drums, folded onto the 16ths: 0, +19, +7 and +18 ms), from
     /// zero and from the -223 ms "Plot Twist" once settled on, half a beat wrong, and carried into the next songs.
     func testRealSongsSettleOnTheirDrums() throws {

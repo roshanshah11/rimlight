@@ -31,6 +31,8 @@ public struct RimSettings: Codable, Equatable, Sendable {
     /// The welcome window was shown (a new install shows it once; a settings file from before it existed counts as
     /// welcomed).
     public var welcomed = false
+    /// Look for a newer release on GitHub once a day (the menu offers it; nothing installs by itself).
+    public var checkForUpdates = true
 
     public init() {}
 
@@ -60,6 +62,7 @@ public struct RimSettings: Codable, Equatable, Sendable {
         deviceOffsets = v(.deviceOffsets, d.deviceOffsets)
         renderScale = v(.renderScale, d.renderScale)
         welcomed = v(.welcomed, true)
+        checkForUpdates = v(.checkForUpdates, d.checkForUpdates)
         clamp()
     }
 

@@ -16,7 +16,8 @@
   <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSHumanReadableCopyright</key><string>© 2026 Roshan Shah. All rights reserved.</string>
+  <key>RimlightUpdateRepo</key><string>roshanshah11/rimlight</string>
+  <key>NSHumanReadableCopyright</key><string>© 2026 Roshan Shah. MIT License.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Rimlight times your speakers or headphones by listening for short chirps on your Mac's built-in mic, only while you calibrate. Nothing is recorded or saved.</string>
   <key>NSAudioCaptureUsageDescription</key>

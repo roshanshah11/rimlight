@@ -79,3 +79,30 @@ final class PlayerTests: XCTestCase {
         XCTAssertFalse(unwelcomed.welcomed)
     }
 }
+
+/// Telling a newer release from GitHub's latest-release answer.
+final class UpdateTests: XCTestCase {
+    func testVersionsCompareByNumber() {
+        XCTAssertTrue(Version.isNewer("1.0.1", than: "1.0.0"))
+        XCTAssertTrue(Version.isNewer("v1.10.0", than: "1.9.9"))
+        XCTAssertTrue(Version.isNewer("2", than: "1.9"))
+        XCTAssertFalse(Version.isNewer("1.2", than: "1.2.0"))
+        XCTAssertFalse(Version.isNewer("1.0.0", than: "1.0.1"))
+        XCTAssertFalse(Version.isNewer("1.1.0-beta", than: "1.0.0"), "not a plain release")
+        XCTAssertFalse(Version.isNewer("", than: "1.0.0"))
+    }
+
+    func testLatestReleaseParse() throws {
+        let json = #"""
+        {"tag_name": "v1.1.0", "html_url": "https://github.com/roshanshah11/rimlight/releases/tag/v1.1.0", "draft": false,
+         "prerelease": false, "assets": [{"browser_download_url": "https://github.com/roshanshah11/rimlight/releases/download/v1.1.0/notes.txt"},
+         {"browser_download_url": "https://github.com/roshanshah11/rimlight/releases/download/v1.1.0/Rimlight-1.1.0.dmg"}]}
+        """#
+        let r = try XCTUnwrap(GitHubRelease.parse(Data(json.utf8)))
+        XCTAssertEqual(r.version, "1.1.0")
+        XCTAssertEqual(r.download?.lastPathComponent, "Rimlight-1.1.0.dmg")
+        XCTAssertEqual(r.page.lastPathComponent, "v1.1.0")
+        XCTAssertNil(GitHubRelease.parse(Data(json.replacingOccurrences(of: #""prerelease": false"#, with: #""prerelease": true"#).utf8)))
+        XCTAssertNil(GitHubRelease.parse(Data(#"{"message": "Not Found"}"#.utf8)))
+    }
+}

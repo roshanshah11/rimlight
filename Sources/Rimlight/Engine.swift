@@ -108,7 +108,7 @@ final class Engine {
         let saved = (try? Data(contentsOf: Self.calibrationURL)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         gridSync = GridSync(calibrator: GridCalibrator(offset: (saved?["offset"] as? NSNumber)?.doubleValue ?? 0))
         director.allowFlashes = settings.flashes
-        director.setStyle(.hiphop)                       // most of what he plays; the judge corrects it per song
+        director.setStyle(.hiphop)                       // rap and pop are the common case; the judge corrects it per song
         director.forcedStyle = settings.motion == .flow ? .ambient : nil
         if settings.colorSource == .custom { setColors(customColors()) }
     }
@@ -375,7 +375,7 @@ final class Engine {
         director.setPlan(plan)
     }
 
-    /// One line per song in songs.jsonl: the style it got and why, to check the judge against his real library.
+    /// One line per song in songs.jsonl: the style it got and why, to check the judge against a real library.
     private func logSong() {
         guard let t = track, director.judge.evidence.beats > 0 else { return }
         struct Entry: Encodable {
@@ -753,6 +753,9 @@ final class Engine {
     /// The tap has run for 8 s and heard only digital silence: almost always macOS's System Audio Recording
     /// permission turned off for Rimlight (a tap it may not record delivers zeros, with no error).
     var audioBlocked: Bool { audio.running && !audio.heardSound && CACurrentMediaTime() - audio.startedAt > 8 }
+
+    /// The Spotify extension is talking to Rimlight right now.
+    var bridgeConnected: Bool { bridge.connected }
 
     /// Synced lyrics have come from the Spotify extension this session (the menu offers the lyrics line only then).
     private(set) var hasLyricsSource = false

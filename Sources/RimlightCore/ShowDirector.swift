@@ -83,7 +83,7 @@ public final class ShowDirector {
     /// Minimum time between full-rim brightness jumps or color swaps: at most 3 per second (WCAG 2.3.1).
     public static let minFlashGap = 1.0 / 3.0 + 0.001
     /// The beats are on the music (Spotify's map once its correction settled, or the live clock locked): a rap hit
-    /// is only lit if it's on a 16th of them, within this much. On his songs 10 to 44% of the heard hits were off the
+    /// is only lit if it's on a 16th of them, within this much. On four real rap songs 10 to 44% of the heard hits were off the
     /// 16ths (voices and synths with no drum under them), and lit, they read as random (2026-10-25).
     public var onGrid = false
     public static let gridTolerance = 0.025

@@ -6,7 +6,7 @@ import Foundation
 /// so each detected hit is matched to the map and the song's correction (sound time minus map time) is learned on its
 /// own: `newTrack()` forgets the last song's hits and starts from its offset.
 ///
-/// Every drum hit in his music lands on an 8th note, the off-beat as often as the beat (a trap clap or 808 on the
+/// Every drum hit in rap and pop lands on an 8th note, the off-beat as often as the beat (a trap clap or 808 on the
 /// "and"), so a new song folds its hits onto half a beat and takes the place they pile up nearest the starting guess,
 /// never more than a quarter beat from it. The guess is the songs' running average, kept within 30 ms of zero: every
 /// song so far sits within 60 ms of that, inside a quarter beat up to 250 BPM. Folding onto the whole beat instead let

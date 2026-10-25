@@ -32,7 +32,7 @@ public enum ShowStyle: String, Sendable, CaseIterable {
 ///
 /// Thresholds come from the synthetic genres only (SyntheticSong, SyntheticTrap, SyntheticBallad, 2026-10-25: bass
 /// share +8.0, +7.7 and +4.5 dB; a kick on 92%, 25% and 10% of the beats once the music is in). Every verdict is
-/// logged with its evidence (Engine's songs.jsonl) so they can be checked against his real library.
+/// logged with its evidence (Engine's songs.jsonl) so they can be checked against a real library.
 public struct StyleJudge: Sendable {
     public struct Evidence: Sendable, Codable, Equatable {
         public var beats = 0              // beats of music heard (outside quiet parts)
