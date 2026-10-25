@@ -4,9 +4,9 @@ import AVFoundation
 import CoreAudio
 import RimlightCore
 
-/// Measures the current output's delay by ear, without him: eight chirps play through it (his Beats, one earcup held
-/// against the MacBook) and the MacBook's own mic times each one (ChirpCalibration). The Beats' mic is never opened,
-/// so they stay in stereo. The result replaces macOS's reported latency for that output.
+/// Measures the current output's delay by ear: eight chirps play through it (Bluetooth headphones: one earcup held
+/// against the Mac) and the Mac's built-in mic times each one (ChirpCalibration). The headphones' mic is never
+/// opened, so they stay in stereo. The result replaces macOS's reported latency for that output.
 final class ChirpRun: @unchecked Sendable {
     struct Outcome {
         var result: ChirpCalibration.Result; var outputName: String; var outputUID: String
@@ -271,14 +271,18 @@ final class AutoCalibration: NSObject {
         let song = songPlaying
             ? " Keep the song playing: Rimlight lines up the song as it hears it with what the mic hears, which times the whole way to your ears."
             : " Playing a song first makes it more exact: Rimlight then times the song itself, the whole way to your ears."
-        text.stringValue = (bluetooth
-            ? "Hold one earcup of \(outputName) right against the MacBook, by the keyboard, then press Start. Eight short chirps play in it; the MacBook's mic times them (the headphones' mic isn't used)."
-            : "Keep the room quiet and press Start. Eight short chirps play through \(outputName); the MacBook's mic times them.") + song
+        let hasMic = ChirpRun.builtInMic() != nil
+        text.stringValue = !hasMic
+            ? "This Mac has no built-in mic, so Rimlight can't time \(outputName) by ear. Adjust by hand instead: clicks play with a flash on the screen's edge, and you move the flash onto the click."
+            : (bluetooth
+            ? "Hold one earcup of \(outputName) right against your Mac (on a MacBook, by the keyboard), then press Start. Eight short chirps play in it; your Mac's built-in mic times them (the headphones' mic isn't used)."
+            : "Keep the room quiet and press Start. Eight short chirps play through \(outputName); your Mac's built-in mic times them.") + song
         text.font = .systemFont(ofSize: 13)
         status.font = .systemFont(ofSize: 13, weight: .medium)
         status.stringValue = ""
         let start = NSButton(title: "Start", target: self, action: #selector(begin))
         start.keyEquivalent = "\r"
+        start.isEnabled = hasMic
         startButton = start
         let manual = NSButton(title: "Adjust by hand…", target: self, action: #selector(byHand))
         let close = NSButton(title: "Close", target: self, action: #selector(closePanel))
@@ -317,7 +321,7 @@ final class AutoCalibration: NSObject {
         run = nil
         startButton?.isEnabled = true
         startButton?.title = "Again"
-        guard let o else { status.stringValue = "Couldn't open the MacBook's mic or the output."; return }
+        guard let o else { status.stringValue = "Couldn't open your Mac's built-in mic or the output."; return }
         let r = o.result
         engine.logCalibration(o)
         guard o.ok else {

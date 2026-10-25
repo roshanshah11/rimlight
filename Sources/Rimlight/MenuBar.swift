@@ -23,8 +23,15 @@ final class MenuBar: NSObject, NSMenuDelegate {
         menu.removeAllItems()
         let s = engine.settings
 
-        menu.addItem(info(engine.songLine ?? "Nothing playing in Spotify"))
+        menu.addItem(info(engine.nowPlayingLine))
         if s.enabled, engine.songLine != nil { menu.addItem(info(lookSummary(s))) }
+        if s.enabled, engine.audioBlocked {
+            menu.addItem(info("Rimlight hears only silence. If music is playing, macOS isn't letting it listen."))
+            menu.addItem(ActionItem(title: "Allow in System Settings…") {
+                // Privacy & Security › Screen & System Audio Recording › System Audio Recording Only
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")!)
+            })
+        }
         menu.addItem(.separator())
 
         menu.addItem(toggle("Light show", s.enabled) { $0.enabled.toggle() })
@@ -44,6 +51,13 @@ final class MenuBar: NSObject, NSMenuDelegate {
         let more = NSMenuItem(title: "More", action: nil, keyEquivalent: "")
         more.submenu = moreMenu(s)
         menu.addItem(more)
+        menu.addItem(ActionItem(title: "About Rimlight") {
+            NSApp.activate()
+            NSApp.orderFrontStandardAboutPanel(options: [
+                .credits: NSAttributedString(string: "Light from the music, around the edges of your screen.",
+                                             attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]),
+            ])
+        })
         menu.addItem(NSMenuItem(title: "Quit Rimlight", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
@@ -73,11 +87,27 @@ final class MenuBar: NSObject, NSMenuDelegate {
             $0.colorSource = $0.colorSource == .album ? .custom : .album
         })
         m.addItem(toggle("White hits on drops", s.flashes) { $0.flashes.toggle() })
-        m.addItem(toggle("Only the iMac while it's streaming", s.iMacOnly) { $0.iMacOnly.toggle() })
         m.addItem(toggle("Fade out when music stops", s.idleWhenPaused) { $0.idleWhenPaused.toggle() })
-        m.addItem(toggle("Wrap the notch", s.wrapNotch) { $0.wrapNotch.toggle() })
-        m.addItem(toggle("HDR flashes on the XDR screen", s.hdr) { $0.hdr.toggle() })
-        m.addItem(toggle("Lyrics line (Spicy Lyrics already shows them)", s.lyrics) { $0.lyrics.toggle() })
+        // the rest only where they mean something on this Mac
+        if ScreenOverlay.streamSetUp {
+            m.addItem(toggle("Only the iMac while it's streaming", s.iMacOnly) { $0.iMacOnly.toggle() })
+        }
+        if NSScreen.screens.contains(where: { $0.safeAreaInsets.top > 0 }) {
+            m.addItem(toggle("Wrap the notch", s.wrapNotch) { $0.wrapNotch.toggle() })
+        }
+        if NSScreen.screens.contains(where: { $0.maximumPotentialExtendedDynamicRangeColorComponentValue > 1 }) {
+            m.addItem(toggle("Brighter flashes on HDR screens", s.hdr) { $0.hdr.toggle() })
+        }
+        if engine.hasLyricsSource || s.lyrics {
+            m.addItem(toggle("Lyrics line on the screen", s.lyrics) { $0.lyrics.toggle() })
+        }
+        m.addItem(.separator())
+        let login = ActionItem(title: "Open at login") { [weak self] in
+            LoginItem.set(!LoginItem.enabled)
+            self?.engine.onChange?()
+        }
+        login.state = LoginItem.enabled ? .on : .off
+        m.addItem(login)
         return m
     }
 

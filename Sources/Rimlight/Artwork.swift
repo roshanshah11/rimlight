@@ -2,8 +2,9 @@ import Foundation
 import ImageIO
 import RimlightCore
 
-/// Album-art colors for a Spotify track. The cover URL comes from the Spicetify extension when it runs, otherwise
-/// from Spotify's public oEmbed endpoint for the track. Results are cached per track.
+/// Album-art colors for the song that's on. A Spotify track's cover comes from the Spotify extension when it runs,
+/// otherwise from Spotify's public oEmbed endpoint for the track; a Music song's from Apple's public iTunes Search
+/// (its artist and album; Music's notification carries no artwork). Results are cached per track.
 enum Artwork {
     private static var cache: [String: [RGB]] = [:]
 
@@ -32,6 +33,7 @@ enum Artwork {
                 return done(URL(string: "https://i.scdn.co/image/" + img.dropFirst("spotify:image:".count)))
             }
         }
+        if track.uri.hasPrefix(MusicPlayerInfo.uriPrefix) { return iTunesCover(track, done) }
         let parts = track.uri.split(separator: ":")
         guard parts.count == 3, parts[1] == "track" || parts[1] == "episode",
               var q = URLComponents(string: "https://open.spotify.com/oembed") else { return done(nil) }
@@ -40,6 +42,20 @@ enum Artwork {
         URLSession.shared.dataTask(with: url) { data, _, _ in
             let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             done((json?["thumbnail_url"] as? String).flatMap(URL.init(string:)))
+        }.resume()
+    }
+
+    private static func iTunesCover(_ track: BridgeMessage.Track, _ done: @escaping (URL?) -> Void) {
+        let term = [track.artist, track.album ?? track.name].compactMap { $0 }.joined(separator: " ")
+        guard !term.isEmpty, var q = URLComponents(string: "https://itunes.apple.com/search") else { return done(nil) }
+        q.queryItems = [URLQueryItem(name: "term", value: term), URLQueryItem(name: "entity", value: track.album == nil ? "song" : "album"),
+                        URLQueryItem(name: "limit", value: "1")]
+        guard let url = q.url else { return done(nil) }
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let art = ((json?["results"] as? [[String: Any]])?.first?["artworkUrl100"] as? String)?
+                .replacingOccurrences(of: "100x100bb", with: "300x300bb")
+            done(art.flatMap(URL.init(string:)))
         }.resume()
     }
 

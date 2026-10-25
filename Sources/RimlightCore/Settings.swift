@@ -28,6 +28,9 @@ public struct RimSettings: Codable, Equatable, Sendable {
     public var deviceOffsets: [String: Double] = [:]
     /// Pixels per point the glow is drawn at (it's scaled up to the screen; 2 = a Retina screen's own resolution).
     public var renderScale = 1.0
+    /// The welcome window was shown (a new install shows it once; a settings file from before it existed counts as
+    /// welcomed).
+    public var welcomed = false
 
     public init() {}
 
@@ -56,6 +59,7 @@ public struct RimSettings: Codable, Equatable, Sendable {
         flashes = v(.flashes, d.flashes)
         deviceOffsets = v(.deviceOffsets, d.deviceOffsets)
         renderScale = v(.renderScale, d.renderScale)
+        welcomed = v(.welcomed, true)
         clamp()
     }
 

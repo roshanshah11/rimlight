@@ -1,3 +1,4 @@
+import Accelerate
 import AudioToolbox
 import CoreAudio
 import Foundation
@@ -26,6 +27,13 @@ final class AudioTap {
     /// The process objects being listened to, and their names for `rimlight status`.
     private(set) var tapped: [AudioObjectID] = []
     private(set) var tappedNames: [String] = []
+
+    /// When the tap started, and whether it has delivered anything but digital silence since: a tap macOS hasn't
+    /// been allowed to record delivers zeros with no error.
+    private(set) var startedAt = 0.0
+    var heardSound: Bool { heardLock.lock(); defer { heardLock.unlock() }; return heard }
+    private var heard = false
+    private let heardLock = NSLock()
 
     private let queue = DispatchQueue(label: "com.roshan.rimlight.audio", qos: .userInteractive)
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -70,6 +78,8 @@ final class AudioTap {
             self?.handle(input, inputTime.pointee)
         }, "create IO proc")
         procID = proc
+        heardLock.lock(); heard = false; heardLock.unlock()
+        startedAt = CACurrentMediaTime()
         try check(AudioDeviceStart(aggregateID, procID), "start aggregate device")
         running = true
         tapped = processes.map(\.id)
@@ -96,6 +106,30 @@ final class AudioTap {
             d[kAudioAggregateDeviceSubDeviceListKey] = [[kAudioSubDeviceUIDKey: outputUID]]
         }
         return d
+    }
+
+    /// Ask for the "system audio recording" permission up front (the welcome window): a tap on everything, started
+    /// for a moment, is what makes macOS ask. Only the tap, so Bluetooth headphones stay in stereo. Already allowed
+    /// or already denied, nothing shows.
+    static func requestPermission() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+            desc.name = "Rimlight"
+            desc.isPrivate = true
+            desc.muteBehavior = .unmuted
+            var tap = AudioObjectID(kAudioObjectUnknown), agg = AudioObjectID(kAudioObjectUnknown)
+            guard AudioHardwareCreateProcessTap(desc, &tap) == noErr else { return }
+            defer { AudioHardwareDestroyProcessTap(tap) }
+            guard AudioHardwareCreateAggregateDevice(aggregate(tap: desc.uuid) as CFDictionary, &agg) == noErr else { return }
+            defer { AudioHardwareDestroyAggregateDevice(agg) }
+            var proc: AudioDeviceIOProcID?
+            guard AudioDeviceCreateIOProcIDWithBlock(&proc, agg, nil, { _, _, _, _, _ in }) == noErr, let proc else { return }
+            if AudioDeviceStart(agg, proc) == noErr {
+                Thread.sleep(forTimeInterval: 0.5)
+                AudioDeviceStop(agg, proc)
+            }
+            AudioDeviceDestroyIOProcID(agg, proc)
+        }
     }
 
     func stop() {
@@ -157,6 +191,11 @@ final class AudioTap {
             }
         }
         guard frames > 0 else { return }
+        if !heard {
+            var peak: Float = 0
+            vDSP_maxmgv(mono, 1, &peak, vDSP_Length(frames))
+            if peak > 0 { heardLock.lock(); heard = true; heardLock.unlock() }
+        }
         // when the first of these samples was played (the tap's own timestamp; else estimate from now)
         let start = ts.mFlags.contains(.hostTimeValid) ? Double(ts.mHostTime) * Self.hostSeconds
             : CACurrentMediaTime() - Double(frames) / sampleRate

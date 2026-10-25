@@ -12,6 +12,9 @@ enum CLI {
     static let litNote = Notification.Name("com.roshan.rimlight.debug-lit")
 
     static func run(_ args: [String]) -> Int32 {
+        if ["version", "--version", "-v"].contains(args.first ?? "") { print("Rimlight \(version)"); return 0 }
+        if args.first == "debug-welcome", args.count >= 2 { return debugWelcome(to: args[1]) ? 0 : 1 }
+        if args.first == "debug-tap-level" { return debugTapLevel(seconds: Double(args.dropFirst().first ?? "") ?? 3) }
         if args.first == "palette", args.count >= 3 { return paletteSheet(out: args[1], images: Array(args.dropFirst(2))) ? 0 : 1 }
         if args.first == "debug-plan", args.count >= 2 { return debugPlan(args[1]) ? 0 : 1 }
         if args.first == "debug-tap-compare", args.count >= 2 { return debugTapCompare(to: args[1]) ? 0 : 1 }
@@ -37,7 +40,7 @@ enum CLI {
                 print("no result (is Rimlight running, and does it have the microphone?)"); return 1
             }
             DistributedNotificationCenter.default().postNotificationName(calibrateNote, object: step, userInfo: nil, deliverImmediately: true)
-            if step == "start" { print("Rimlight's timing panel is open: hold an earcup to the MacBook and press Start.") }
+            if step == "start" { print("Rimlight's timing panel is open: headphones, hold an earcup to your Mac, then press Start.") }
             if step == "manual" {
                 print("Clicks are playing in your current output with a flash on the rim: Later/Earlier in the panel (or rimlight calibrate later|earlier), then Save (or rimlight calibrate save). rimlight calibrate stop cancels.")
             }
@@ -72,6 +75,62 @@ enum CLI {
             print(summary(s))
         }
         return 0
+    }
+
+    /// "1.0.0 (57)" from the app's Info.plist; the CLI runs as the app's own binary (~/bin/rimlight links to it).
+    static var version: String {
+        var buf = [CChar](repeating: 0, count: 4096)
+        let path = proc_pidpath(getpid(), &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : CommandLine.arguments[0]
+        let exe = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        let plist = exe.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Info.plist")
+        let info = Bundle.main.infoDictionary?["CFBundleShortVersionString"] != nil ? Bundle.main.infoDictionary
+            : NSDictionary(contentsOf: plist) as? [String: Any]
+        guard let v = info?["CFBundleShortVersionString"] as? String else { return "(not in an app bundle)" }
+        return info?["CFBundleVersion"].map { "\(v) (\($0))" } ?? v
+    }
+
+    /// The welcome window, drawn offscreen to a PNG (checks its layout without showing it).
+    static func debugWelcome(to path: String) -> Bool {
+        _ = NSApplication.shared
+        let view = Welcome().makeView()
+        view.appearance = NSAppearance(named: .aqua)
+        let size = view.fittingSize
+        view.frame = CGRect(origin: .zero, size: size)
+        view.layoutSubtreeIfNeeded()
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return false }
+        do { try png.write(to: URL(fileURLWithPath: path)) } catch { return false }
+        print("\(Int(size.width))x\(Int(size.height)) -> \(path)")
+        return true
+    }
+
+    /// Listen to whatever is playing for a few seconds and print its level: checks that the tap works in this build
+    /// (signing, hardened runtime, permission). Tap-only, so Bluetooth headphones stay in stereo. Run it through
+    /// LaunchServices so macOS asks for Rimlight, not the terminal:
+    /// open -n -W -a Rimlight --args debug-tap-level 3 (it writes tap-level.json beside the settings).
+    static func debugTapLevel(seconds: Double) -> Int32 {
+        let players = AudioTap.players()
+        let url = RimSettings.directory.appendingPathComponent("tap-level.json")
+        func report(_ d: [String: Any]) -> Int32 {
+            if let data = try? JSONSerialization.data(withJSONObject: d) { try? data.write(to: url); print(String(decoding: data, as: UTF8.self)) }
+            return d["error"] == nil ? 0 : 1
+        }
+        guard !players.isEmpty else { return report(["error": "nothing is playing"]) }
+        let tap = AudioTap()
+        let lock = NSLock()
+        var sum = 0.0, count = 0, peak: Float = 0
+        tap.onSamples = { buf, _, _ in
+            lock.lock(); defer { lock.unlock() }
+            for x in buf { sum += Double(x * x); peak = max(peak, abs(x)) }
+            count += buf.count
+        }
+        do { try tap.start(processes: players) } catch { return report(["error": "\(error)"]) }
+        Thread.sleep(forTimeInterval: min(10, seconds))
+        tap.stop()
+        lock.lock(); defer { lock.unlock() }
+        return report(["apps": players.map(\.name), "samples": count, "rms": count > 0 ? (sum / Double(count)).squareRoot() : 0,
+                       "peak": peak, "heardSound": tap.heardSound])
     }
 
     static func summary(_ s: RimSettings) -> String {

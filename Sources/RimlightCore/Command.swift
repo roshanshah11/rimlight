@@ -13,7 +13,7 @@ public enum Command: Equatable, Sendable {
     case debugRender(String)   // png path
 
     public static let usage = """
-    usage: rimlight on | off | toggle | status
+    usage: rimlight on | off | toggle | status | version
            rimlight motion beat|flow|steady
            rimlight brightness 0-100 | strength 0-100 | glow <pt> | thickness <pt>
            rimlight lyrics on|off | offset <ms>

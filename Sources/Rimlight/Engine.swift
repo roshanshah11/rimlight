@@ -71,7 +71,8 @@ final class Engine {
 
     private(set) var track: BridgeMessage.Track?
     private var clock = PlaybackClock()
-    private var spotifyKnown = false      // a play state arrived and Spotify is still running
+    private var playerKnown = false       // a play state arrived and its app is still running
+    private var players = PlayerArbiter()   // whose song is on: Spotify or Music
     private var grid: BeatGrid?
     private var plan: SongPlan?
     private var lyrics: LyricsTimeline?
@@ -141,8 +142,12 @@ final class Engine {
         }
         audioStatus = "nothing playing"
 
-        bridge.onMessage = { [weak self] m in self?.handle(m) }
+        bridge.onMessage = { [weak self] m in self?.receive(m, from: Self.spotifyID) }
         bridge.start()
+        DistributedNotificationCenter.default().addObserver(forName: MusicPlayerInfo.notification, object: nil, queue: .main) { [weak self] n in
+            guard let self, let info = n.userInfo else { return }
+            for m in MusicPlayerInfo.messages(from: info) { self.receive(m, from: MusicPlayerInfo.bundleID) }
+        }
 
         let nc = NotificationCenter.default
         nc.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
@@ -228,7 +233,7 @@ final class Engine {
         guard now - lastPlayersCheck >= 0.5 else { return }
         lastPlayersCheck = now
         var players = settings.enabled ? AudioTap.players() : []
-        if spotifyKnown, !spotifyPlaying { players = [] }
+        if playerKnown, !playerPlaying { players = [] }
         if players.isEmpty {
             guard audio.running else { playersGoneAt = nil; return }
             if playersGoneAt == nil { playersGoneAt = now }
@@ -304,9 +309,17 @@ final class Engine {
         }
     }
 
-    // MARK: Spotify
+    // MARK: players (Spotify, Music)
 
-    var spotifyPlaying: Bool { track != nil && !clock.paused }
+    static let spotifyID = "com.spotify.client"
+
+    var playerPlaying: Bool { track != nil && !clock.paused }
+
+    /// A message from a player app: Spotify (its bridge or its notification) or Music (its notification), through
+    /// the arbiter that picks whose song is on.
+    private func receive(_ m: BridgeMessage, from source: String) {
+        for x in players.receive(m, from: source, playing: playerPlaying) { handle(x) }
+    }
 
     private func handle(_ m: BridgeMessage) {
         switch m {
@@ -333,13 +346,14 @@ final class Engine {
             if settings.colorSource == .album, changed || (t.image != nil && Artwork.isMissing(t.uri)) { loadArtwork(merged) }
             onChange?()
         case .state(let paused, let progressMs, let sentAt):
-            spotifyKnown = true
+            playerKnown = true
             clock.durationMs = track?.durationMs ?? clock.durationMs
             clock.update(progressMs: progressMs, reportedAt: sentAt, paused: paused)
             onChange?()
         case .lyrics(let uri, let synced, let lines):
             guard uri == track?.uri else { return }
             lyrics = synced && !lines.isEmpty ? LyricsTimeline(uri: uri, lines: lines) : nil
+            if lyrics != nil { hasLyricsSource = true }
             rebuildPlan()   // the hook comes from the lyrics
         case .analysis(let uri, let tempo, let b, let conf, let bars, let sections, let loudness):
             guard uri == track?.uri, !b.isEmpty else { return }
@@ -480,7 +494,7 @@ final class Engine {
         a.onManual = { [weak self] in self?.auto = nil; self?.startCalibration() }
         auto = a
         let bluetooth = (try? AudioTap.defaultOutput()).map(AudioTap.isBluetooth) ?? false
-        a.show(outputName: output.name, bluetooth: bluetooth, songPlaying: spotifyPlaying && !beats.features(now: CACurrentMediaTime()).silent)
+        a.show(outputName: output.name, bluetooth: bluetooth, songPlaying: playerPlaying && !beats.features(now: CACurrentMediaTime()).silent)
     }
 
     func saveMeasuredLatency(uid: String, offsetMs: Double) {
@@ -545,11 +559,11 @@ final class Engine {
         if calibration != nil || CACurrentMediaTime() < litUntil { return true }
         guard settings.enabled, !memoryCritical else { return false }
         if !settings.idleWhenPaused { return true }
-        if spotifyKnown { return spotifyPlaying }
+        if playerKnown { return playerPlaying }
         // just launched with Spotify open: give the bridge a few seconds to say whether it's playing, so another
         // app's sound doesn't flash the rim first
         let now = CACurrentMediaTime()
-        if now - launchedAt < 6, !NSRunningApplication.runningApplications(withBundleIdentifier: "com.spotify.client").isEmpty {
+        if now - launchedAt < 6, !NSRunningApplication.runningApplications(withBundleIdentifier: Self.spotifyID).isEmpty {
             return false
         }
         return !beats.features(now: now).silent
@@ -569,7 +583,7 @@ final class Engine {
     private func advanceShow(to t: Double) {
         let now = CACurrentMediaTime()
         let f = beats.features(now: now)
-        let haveGrid = grid != nil && spotifyPlaying
+        let haveGrid = grid != nil && playerPlaying
         // the map's beats light the show once this song's offset is measured (or while it's still early); a song
         // whose offset hasn't settled after 15 s (the guess was more than a quarter beat out) is lit from the live
         // clock instead while the map keeps learning
@@ -657,7 +671,7 @@ final class Engine {
         updateTap(now)
 
         var line: String?, next: String?
-        if settings.lyrics, fade > 0.5, spotifyPlaying, let l = lyrics {
+        if settings.lyrics, fade > 0.5, playerPlaying, let l = lyrics {
             let ms = clock.position(at: Date().timeIntervalSince1970 * 1000)
             line = l.line(at: ms)
             next = line == nil ? nil : l.next(after: ms)
@@ -666,8 +680,8 @@ final class Engine {
 
         if now - lastStatus >= 1 {
             lastStatus = now
-            if spotifyKnown, NSRunningApplication.runningApplications(withBundleIdentifier: "com.spotify.client").isEmpty {
-                spotifyKnown = false
+            if playerKnown, let app = players.current, NSRunningApplication.runningApplications(withBundleIdentifier: app).isEmpty {
+                playerKnown = false
                 clock.paused = true
             }
             writeStatus(line: line)
@@ -681,7 +695,7 @@ final class Engine {
     var beatSource: String {
         if settings.motion == .steady { return "off (steady)" }
         if settings.motion == .flow { return "audio energy (flow)" }
-        if grid != nil, spotifyPlaying {
+        if grid != nil, playerPlaying {
             return plan != nil ? "Spotify beat map + song plan" : "Spotify beat map"
         }
         if beats.features(now: CACurrentMediaTime()).silent { return "waiting for sound" }
@@ -689,7 +703,7 @@ final class Engine {
     }
 
     var tempo: Double? {
-        if let g = grid, spotifyPlaying { return g.tempo }
+        if let g = grid, playerPlaying { return g.tempo }
         if beats.features(now: CACurrentMediaTime()).silent { return nil }
         return beatClock.locked ? beatClock.period.map { 60 / $0 } : beats.tempo
     }
@@ -727,6 +741,21 @@ final class Engine {
         }
         return line
     }
+
+    /// The menu's first line: the song, else the apps Rimlight hears, else a nudge.
+    var nowPlayingLine: String {
+        if let s = songLine { return s }
+        if !settings.enabled { return "The light show is off" }
+        if audio.running, !audio.tappedNames.isEmpty { return "Listening to " + audio.tappedNames.joined(separator: ", ") }
+        return "Play some music"
+    }
+
+    /// The tap has run for 8 s and heard only digital silence: almost always macOS's System Audio Recording
+    /// permission turned off for Rimlight (a tap it may not record delivers zeros, with no error).
+    var audioBlocked: Bool { audio.running && !audio.heardSound && CACurrentMediaTime() - audio.startedAt > 8 }
+
+    /// Synced lyrics have come from the Spotify extension this session (the menu offers the lyrics line only then).
+    private(set) var hasLyricsSource = false
 
     var songLine: String? {
         guard let t = track, let name = t.name else { return nil }

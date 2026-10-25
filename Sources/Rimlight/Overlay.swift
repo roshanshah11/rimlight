@@ -40,8 +40,12 @@ final class ScreenOverlay: NSObject {
     private var strips: [(window: StripWindow, layer: CAMetalLayer, rect: CGRect)] = []
     private var link: CADisplayLink?
 
+    /// The iMac stream (~/Projects/imac) is set up on this Mac: its sender keeps a folder in Application Support.
+    static let streamSetUp = FileManager.default.fileExists(atPath: FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/imac-display").path)
+
     static func isStreamed(_ screen: NSScreen) -> Bool {
-        CGDisplayIsBuiltin(displayID(screen)) == 0 && screen.localizedName.lowercased().contains("imac")
+        streamSetUp && CGDisplayIsBuiltin(displayID(screen)) == 0 && screen.localizedName.lowercased().contains("imac")
     }
 
     static func displayID(_ screen: NSScreen) -> CGDirectDisplayID {
