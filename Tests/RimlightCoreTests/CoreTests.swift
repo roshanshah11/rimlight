@@ -51,20 +51,51 @@ final class PaletteTests: XCTestCase {
     func testPicksTheVividColors() {
         let px = image([(200, 30, 40), (30, 60, 210), (20, 20, 20)], each: 600)
         let p = Palette.extract(rgba: px)
-        XCTAssertEqual(p.count, 3)
+        XCTAssertEqual(p.count, 2, p.map(\.hex).joined(separator: " "))     // the black isn't a light color
         let hues = p.map { $0.hsv.h }
         XCTAssertTrue(hues.contains { $0 < 0.05 || $0 > 0.95 }, "red missing: \(p.map(\.hex))")
         XCTAssertTrue(hues.contains { abs($0 - 0.63) < 0.06 }, "blue missing: \(p.map(\.hex))")
     }
 
-    func testDarkArtStillGlows() {
+    func testDarkArtStillGlowsInItsOwnHue() {
         let p = Palette.extract(rgba: image([(40, 10, 60), (10, 10, 10)], each: 800))
-        XCTAssertTrue(p.allSatisfy { $0.hsv.v >= 0.84 }, p.map(\.hex).joined(separator: " "))
+        XCTAssertEqual(p.count, 2, p.map(\.hex).joined(separator: " "))       // the purple, then a white for it
+        XCTAssertGreaterThan(p[0].hsv.v, 0.7, p[0].hex)
+        XCTAssertGreaterThan(p[0].hsv.s, 0.6, "a light, not a pastel: \(p[0].hex)")
+        XCTAssertEqual(p[0].hsv.h, RGB(40 / 255, 10 / 255, 60 / 255).hsv.h, accuracy: 0.05)   // still purple
+        XCTAssertLessThan(p[1].hsv.s, 0.15)
     }
 
-    func testGreyArtGivesThreeColors() {
-        let p = Palette.extract(rgba: image([(128, 128, 128)], each: 1000))
-        XCTAssertEqual(p.count, 3)
+    func testSaturatedCoversGiveSaturatedLights() {
+        // a pure red cover (like Nothing But the Beat) should light red, not salmon
+        let p = Palette.extract(rgba: image([(220, 20, 40), (250, 250, 250)], each: 800))
+        XCTAssertGreaterThan(p[0].hsv.s, 0.8, p[0].hex)
+        XCTAssertTrue(p[0].hsv.h < 0.03 || p[0].hsv.h > 0.95, p[0].hex)
+    }
+
+    func testNearBlackCastsDontBecomeColors() {
+        // dark red art on near-black with a faint blue cast (TRAPSOUL): red only, no invented teal
+        let p = Palette.extract(rgba: image([(90, 15, 20)], each: 500) + image([(14, 18, 24)], each: 1500))
+        XCTAssertEqual(p.count, 2, p.map(\.hex).joined(separator: " "))
+        XCTAssertTrue(p[0].hsv.h < 0.05 || p[0].hsv.h > 0.93, p[0].hex)
+        XCTAssertLessThan(p[1].hsv.s, 0.15, "second should be the tinted white, got \(p[1].hex)")
+    }
+
+    func testGreyArtGivesWhites() {
+        XCTAssertEqual(Palette.extract(rgba: image([(128, 128, 128)], each: 1000)), Palette.whites)
+    }
+
+    func testRareHueIsIgnored() {
+        // a 0.5% speck of green on a blue cover is not a palette color
+        let p = Palette.extract(rgba: image([(30, 60, 210)], each: 995) + image([(20, 220, 40)], each: 5))
+        XCTAssertEqual(p.count, 2, p.map(\.hex).joined(separator: " "))
+        XCTAssertFalse(p.contains { abs($0.hsv.h - 0.36) < 0.08 && $0.hsv.s > 0.3 }, "the green speck was picked")
+    }
+
+    func testPicksAreSpreadInHue() {
+        // two near-identical blues and an orange: expect blue + orange, not blue + blue
+        let p = Palette.extract(rgba: image([(30, 60, 210), (40, 80, 230), (240, 140, 30)], each: 500))
+        XCTAssertEqual(p.count, 2, p.map(\.hex).joined(separator: " "))
     }
 
     func testTinyOrTransparentImageFallsBack() {
@@ -117,7 +148,8 @@ final class SettingsAndCommandTests: XCTestCase {
         Command.parse(["toggle"])!.apply(to: &s); XCTAssertTrue(s.enabled)
         XCTAssertEqual(Command.parse(["motion", "Steady"]), .motion(.steady))
         Command.parse(["brightness", "150"])!.apply(to: &s); XCTAssertEqual(s.brightness, 1)
-        Command.parse(["glow", "999"])!.apply(to: &s); XCTAssertEqual(s.glow, 200)
+        Command.parse(["glow", "999"])!.apply(to: &s); XCTAssertEqual(s.glow, 240)
+        Command.parse(["strength", "90"])!.apply(to: &s); XCTAssertEqual(s.reactivity, 0.9, accuracy: 1e-9)
         XCTAssertEqual(Command.parse(["lyrics", "off"]), .lyrics(false))
         XCTAssertNil(Command.parse(["motion", "disco"]))
         XCTAssertNil(Command.parse(["nonsense"]))
@@ -136,6 +168,19 @@ final class SettingsAndCommandTests: XCTestCase {
     }
 }
 
+final class PlaybackClockTests: XCTestCase {
+    func testJitterIsSmoothedButSeeksJump() {
+        var c = PlaybackClock(progressMs: 10_000, reportedAt: 0, paused: false)
+        c.update(progressMs: 15_040, reportedAt: 5_000, paused: false)       // 40 ms of jitter
+        XCTAssertEqual(c.position(at: 5_000), 15_010, accuracy: 0.01)        // a quarter of it
+        c.update(progressMs: 60_000, reportedAt: 6_000, paused: false)       // a seek
+        XCTAssertEqual(c.position(at: 6_000), 60_000, accuracy: 0.01)
+        c.update(progressMs: 61_000, reportedAt: 7_000, paused: true)        // pause takes the report
+        XCTAssertTrue(c.paused)
+        XCTAssertEqual(c.position(at: 9_000), 61_000, accuracy: 0.01)
+    }
+}
+
 final class BridgeTests: XCTestCase {
     func testDecodesExtensionMessages() {
         let track = ##"{"type":"track","uri":"spotify:track:1","name":"Song","artist":"A","image":"https://i.scdn.co/image/x","durationMs":180000,"colors":{"VIBRANT":"#FF0000"}}"##
@@ -150,6 +195,11 @@ final class BridgeTests: XCTestCase {
 
         let an = #"{"type":"analysis","uri":"u","tempo":120,"beats":[[0.5,0.9],[1.0,0.4]],"bars":[0.5]}"#
         XCTAssertEqual(BridgeMessage.decode(Data(an.utf8)), .analysis(uri: "u", tempo: 120, beats: [0.5, 1.0], confidence: [0.9, 0.4], bars: [0.5]))
+
+        let full = #"{"type":"analysis","uri":"u","tempo":120,"beats":[[0.5,0.9]],"bars":[0.5],"sections":[[0,30,-9.5]],"loudness":[-7.25]}"#
+        XCTAssertEqual(BridgeMessage.decode(Data(full.utf8)),
+                       .analysis(uri: "u", tempo: 120, beats: [0.5], confidence: [0.9], bars: [0.5],
+                                 sections: [.init(start: 0, duration: 30, loudness: -9.5)], loudness: [-7.25]))
 
         XCTAssertNil(BridgeMessage.decode(Data("not json".utf8)))
         XCTAssertNil(BridgeMessage.decode(Data(#"{"type":"state"}"#.utf8)))

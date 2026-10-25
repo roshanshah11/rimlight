@@ -1,7 +1,8 @@
 import AppKit
 import RimlightCore
 
-/// The menu bar light: what's playing, the beat source, and every setting the CLI can change.
+/// The menu bar light: the song and the look, the three things worth reaching for (on/off, brightness, sync), and
+/// everything else under More. `rimlight status` keeps the beat source and timing details.
 final class MenuBar: NSObject, NSMenuDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let engine: Engine
@@ -23,38 +24,61 @@ final class MenuBar: NSObject, NSMenuDelegate {
         let s = engine.settings
 
         menu.addItem(info(engine.songLine ?? "Nothing playing in Spotify"))
-        let beats = engine.beatSource + (engine.tempo.map { String(format: ", %.0f BPM", $0) } ?? "")
-        menu.addItem(info("Beats: \(beats)"))
+        if s.enabled, engine.songLine != nil { menu.addItem(info(lookSummary(s))) }
         menu.addItem(.separator())
 
-        menu.addItem(toggle("Glow on", s.enabled) { $0.enabled.toggle() })
-        let motion = NSMenuItem(title: "Motion", action: nil, keyEquivalent: "")
-        let sub = NSMenu()
-        for (m, label) in [(Motion.beat, "Beat: pulse on every kick"), (.flow, "Flow: breathe with the music"),
-                           (.steady, "Steady: no movement")] {
-            sub.addItem(toggle(label, s.motion == m) { $0.motion = m })
-        }
-        motion.submenu = sub
-        menu.addItem(motion)
-        menu.addItem(.separator())
-
+        menu.addItem(toggle("Light show", s.enabled) { $0.enabled.toggle() })
         menu.addItem(slider("Brightness", s.brightness * 100, 0...100, unit: "%") { s, v in s.brightness = v / 100 })
-        menu.addItem(slider("Beat strength", s.reactivity * 100, 0...100, unit: "%") { s, v in s.reactivity = v / 100 })
-        menu.addItem(slider("Glow reach", s.glow, 0...120, unit: " pt") { s, v in s.glow = v })
-        menu.addItem(slider("Line", s.thickness, 1...12, unit: " pt") { s, v in s.thickness = v })
-        menu.addItem(slider("Sync", s.syncOffsetMs, -300...300, unit: " ms") { s, v in s.syncOffsetMs = v })
+        menu.addItem(slider("Sync (if the light is early or late)", s.syncOffsetMs, -300...300, unit: " ms") { s, v in
+            s.syncOffsetMs = v
+        })
+        if engine.calibration == nil {
+            menu.addItem(ActionItem(title: "Calibrate timing for these speakers or headphones…") { [weak self] in
+                self?.engine.startAutoCalibration()
+            })
+        } else {
+            menu.addItem(ActionItem(title: "Stop calibrating") { [weak self] in self?.engine.calibration?.cancel() })
+        }
         menu.addItem(.separator())
 
-        menu.addItem(toggle("Colors from album art", s.colorSource == .album) {
+        let more = NSMenuItem(title: "More", action: nil, keyEquivalent: "")
+        more.submenu = moreMenu(s)
+        menu.addItem(more)
+        menu.addItem(NSMenuItem(title: "Quit Rimlight", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    /// "Hook · rap · 155 BPM", "Ambiance · 70 BPM", or the calm style's name.
+    private func lookSummary(_ s: RimSettings) -> String {
+        if s.motion == .steady { return "Steady" }
+        let st = engine.style
+        var parts = [st.name(engine.section)]
+        if st != .ambient { parts.append(st.label) }
+        if let bpm = engine.tempo { parts.append(String(format: "%.0f BPM", bpm)) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func moreMenu(_ s: RimSettings) -> NSMenu {
+        let m = NSMenu()
+        m.autoenablesItems = false
+        for (mode, label) in [(Motion.beat, "Light show: club, rap or ambiance, picked per song"), (.flow, "Ambiance: a wash that breathes, no hits"),
+                              (.steady, "Steady: no movement")] {
+            m.addItem(toggle(label, s.motion == mode) { $0.motion = mode })
+        }
+        m.addItem(.separator())
+        m.addItem(slider("Glow reach", s.glow, 20...200, unit: " pt") { s, v in s.glow = v })
+        m.addItem(slider("Beat strength", s.reactivity * 100, 0...100, unit: "%") { s, v in s.reactivity = v / 100 })
+        m.addItem(slider("Edge", s.thickness, 1...12, unit: " pt") { s, v in s.thickness = v })
+        m.addItem(.separator())
+        m.addItem(toggle("Colors from album art", s.colorSource == .album) {
             $0.colorSource = $0.colorSource == .album ? .custom : .album
         })
-        menu.addItem(toggle("Lyrics", s.lyrics) { $0.lyrics.toggle() })
-        menu.addItem(toggle("HDR flashes on the XDR screen", s.hdr) { $0.hdr.toggle() })
-        menu.addItem(toggle("Wrap the notch", s.wrapNotch) { $0.wrapNotch.toggle() })
-        menu.addItem(toggle("Fade out when music stops", s.idleWhenPaused) { $0.idleWhenPaused.toggle() })
-        menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit Rimlight", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        menu.addItem(quit)
+        m.addItem(toggle("White hits on drops", s.flashes) { $0.flashes.toggle() })
+        m.addItem(toggle("Only the iMac while it's streaming", s.iMacOnly) { $0.iMacOnly.toggle() })
+        m.addItem(toggle("Fade out when music stops", s.idleWhenPaused) { $0.idleWhenPaused.toggle() })
+        m.addItem(toggle("Wrap the notch", s.wrapNotch) { $0.wrapNotch.toggle() })
+        m.addItem(toggle("HDR flashes on the XDR screen", s.hdr) { $0.hdr.toggle() })
+        m.addItem(toggle("Lyrics line (Spicy Lyrics already shows them)", s.lyrics) { $0.lyrics.toggle() })
+        return m
     }
 
     private func info(_ text: String) -> NSMenuItem {

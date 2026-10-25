@@ -13,7 +13,8 @@ let package = Package(
             dependencies: ["RimlightCore"],
             path: "Sources/Rimlight"
         ),
-        .testTarget(name: "RimlightCoreTests", dependencies: ["RimlightCore"], path: "Tests/RimlightCoreTests"),
+        .testTarget(name: "RimlightCoreTests", dependencies: ["RimlightCore"], path: "Tests/RimlightCoreTests",
+                    resources: [.copy("Fixtures")]),
     ],
     swiftLanguageModes: [.v5]
 )

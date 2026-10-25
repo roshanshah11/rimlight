@@ -12,6 +12,24 @@ public struct PlaybackClock: Equatable, Sendable {
         self.progressMs = progressMs; self.reportedAt = reportedAt; self.paused = paused; self.durationMs = durationMs
     }
 
+    /// Take a new progress report. A small disagreement with where the clock already is (under 150 ms) is report
+    /// jitter: move a quarter of the way, so the beat map doesn't jump every few seconds. A bigger one is a seek or
+    /// a skip: jump. Pausing or resuming always takes the report as is.
+    public mutating func update(progressMs p: Double, reportedAt at: Double, paused nowPaused: Bool) {
+        if !paused, !nowPaused {
+            let expected = position(at: at)
+            let diff = p - expected
+            if abs(diff) < 150 {
+                progressMs = expected + 0.25 * diff
+                reportedAt = at
+                return
+            }
+        }
+        progressMs = p
+        reportedAt = at
+        paused = nowPaused
+    }
+
     /// Track position in ms at epoch-ms `now`.
     public func position(at now: Double) -> Double {
         guard !paused else { return progressMs }

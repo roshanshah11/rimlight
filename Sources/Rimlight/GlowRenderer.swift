@@ -3,36 +3,70 @@ import Metal
 import QuartzCore
 import RimlightCore
 
-/// Everything one frame of glow needs. Colors are linear sRGB; positions are screen points, top-left origin.
+/// Everything one frame needs. Colors are linear sRGB; positions are screen points, top-left origin.
 struct GlowFrame {
     var geometry: RimGeometry
     var scale: Float               // pixels per point
-    var thickness: Float
-    var reach: Float               // halo spread, points
+    var edge: Float                // width of the bright edge source, points
+    var reach: Float               // how far the light blooms in, points
     var brightness: Float          // 0...1
     var fade: Float                // 0...1, idle fade
-    var pulse: Float               // 0...1 beat envelope, already scaled by reactivity
-    var energy: Float              // 0...1
-    var time: Float                // seconds, drives the slow color drift
     var headroom: Float            // EDR headroom of the screen; 1 = no HDR
-    var colors: [SIMD3<Float>]     // three
+    var light: LightState
+    var target: Double = 0         // when the display link expects this frame on screen (host seconds); 0 = untracked
 }
 
-/// One Metal pipeline shared by every strip on every screen. The fragment shader draws a signed-distance rim: a
-/// bright core line on the screen edge (wrapping the notch) and an exponential haze that fades inward.
+/// How late frames really reach the screen against the display link's target, from Metal's presented times: the
+/// compositor can hold a window's frame a refresh or more. Kept per screen, as a slow average.
+final class PresentLag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var mean: Double?
+    private var samples: [Double] = []
+    private(set) var count = 0
+
+    func add(_ lag: Double) {
+        guard lag > -0.05, lag < 0.2 else { return }   // a dropped or stale frame
+        lock.lock(); defer { lock.unlock() }
+        mean = mean.map { $0 + (lag - $0) * 0.02 } ?? lag
+        samples.append(lag)
+        if samples.count > 600 { samples.removeFirst(samples.count - 600) }
+        count += 1
+    }
+
+    /// The average lag once a second's worth of frames is in, seconds.
+    var value: Double? { lock.lock(); defer { lock.unlock() }; return count >= 60 ? mean : nil }
+
+    /// Median and the 10th to 90th percentile of the last few seconds, seconds.
+    var spread: (median: Double, p10: Double, p90: Double)? {
+        lock.lock(); defer { lock.unlock() }
+        guard samples.count >= 30 else { return nil }
+        let s = samples.sorted()
+        return (s[s.count / 2], s[s.count / 10], s[s.count * 9 / 10])
+    }
+}
+
+/// One Metal pipeline shared by every strip on every screen. The rim is treated like a ring of stage lights:
+/// a mirrored row of fixtures, a chase, a wash and white hits, each lit along the edge and blooming inward.
+/// Each edge (and the notch) casts its own bloom, so corners blend instead of creasing. The output is partly
+/// additive (alpha below the color), so it reads as light over the screen rather than paint on it.
 final class GlowRenderer {
     let device: MTLDevice
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
-    private let pipeline8: MTLRenderPipelineState   // 8-bit sRGB target for debug renders
+    private let pipeline8: MTLRenderPipelineState   // 8-bit sRGB target for previews
 
     struct Uniforms {
         var screen: SIMD4<Float>   // w, h, corner radius, scale
         var strip: SIMD4<Float>    // x, y, w, h
         var notch: SIMD4<Float>    // x, y, w, h (w = 0: none)
-        var shape: SIMD4<Float>    // thickness, reach, brightness, fade
-        var motion: SIMD4<Float>   // pulse, energy, time, headroom
-        var c0: SIMD4<Float>, c1: SIMD4<Float>, c2: SIMD4<Float>
+        var shape: SIMD4<Float>    // edge, reach, brightness, fade
+        var look0: SIMD4<Float>    // master, bloom, pulse, flash
+        var look1: SIMD4<Float>    // wash level, fixtures, fixture level, alternate
+        var look2: SIMD4<Float>    // chase position, chase width, chase level, headroom
+        var wash: SIMD4<Float>
+        var colA: SIMD4<Float>
+        var colB: SIMD4<Float>
+        var chase: SIMD4<Float>
     }
 
     init() throws {
@@ -60,24 +94,20 @@ final class GlowRenderer {
         layer.wantsExtendedDynamicRangeContent = hdr
         layer.isOpaque = false
         layer.framebufferOnly = true
-        layer.maximumDrawableCount = 3
-        layer.allowsNextDrawableTimeout = false
+        layer.maximumDrawableCount = 2   // one on screen, one being drawn: the shader is tiny
     }
 
     private func uniforms(_ f: GlowFrame, strip: CGRect) -> Uniforms {
-        let g = f.geometry
-        let n = g.notch ?? .zero
-        let c = (0..<3).map { i -> SIMD4<Float> in
-            let v = i < f.colors.count ? f.colors[i] : SIMD3<Float>(1, 1, 1)
-            return SIMD4(v, 1)
-        }
+        let g = f.geometry, n = g.notch ?? .zero, l = f.light
         return Uniforms(
             screen: SIMD4(Float(g.size.width), Float(g.size.height), Float(g.cornerRadius), f.scale),
             strip: SIMD4(Float(strip.minX), Float(strip.minY), Float(strip.width), Float(strip.height)),
             notch: SIMD4(Float(n.minX), Float(n.minY), Float(n.width), Float(n.height)),
-            shape: SIMD4(f.thickness, f.reach, f.brightness, f.fade),
-            motion: SIMD4(f.pulse, f.energy, f.time, f.headroom),
-            c0: c[0], c1: c[1], c2: c[2])
+            shape: SIMD4(f.edge, f.reach, f.brightness, f.fade),
+            look0: SIMD4(l.master, l.bloom, l.pulse, l.flash),
+            look1: SIMD4(l.washLevel, l.fixtures, l.fixtureLevel, l.alternate),
+            look2: SIMD4(l.chasePos, l.chaseWidth, l.chaseLevel, f.headroom),
+            wash: SIMD4(l.wash, 1), colA: SIMD4(l.colorA, 1), colB: SIMD4(l.colorB, 1), chase: SIMD4(l.chaseColor, 1))
     }
 
     private func encode(_ cb: MTLCommandBuffer, target: MTLTexture, pipeline: MTLRenderPipelineState,
@@ -96,17 +126,54 @@ final class GlowRenderer {
     }
 
     /// Draw one frame into each strip's layer.
-    func draw(_ frame: GlowFrame, into layers: [(CAMetalLayer, CGRect)]) {
+    func draw(_ frame: GlowFrame, into layers: [(CAMetalLayer, CGRect)], lag: PresentLag? = nil) {
         guard let cb = queue.makeCommandBuffer() else { return }
-        for (layer, strip) in layers {
+        for (i, (layer, strip)) in layers.enumerated() {
             guard let drawable = layer.nextDrawable() else { continue }
             encode(cb, target: drawable.texture, pipeline: pipeline, frame: frame, strip: strip)
+            if i == 0, let lag, frame.target > 0 {
+                let target = frame.target
+                drawable.addPresentedHandler { d in if d.presentedTime > 0 { lag.add(d.presentedTime - target) } }
+            }
             cb.present(drawable)
         }
         cb.commit()
     }
 
-    /// Render the whole screen offscreen over a flat "desktop" color and return RGBA8 pixels (sRGB, row-major).
+    /// Render the whole screen offscreen over `backdrop` (RGBA8, the screen's pixel size) into `out`, for videos.
+    func renderPixels(_ frame: GlowFrame, backdrop: [UInt8], into out: inout [UInt8]) {
+        let w = Int(frame.geometry.size.width * CGFloat(frame.scale))
+        let h = Int(frame.geometry.size.height * CGFloat(frame.scale))
+        if target == nil || target!.width != w || target!.height != h {
+            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm_srgb, width: w, height: h, mipmapped: false)
+            td.usage = [.renderTarget, .shaderRead]
+            td.storageMode = .shared
+            target = device.makeTexture(descriptor: td)
+        }
+        guard let tex = target, let cb = queue.makeCommandBuffer() else { return }
+        var f = frame
+        f.headroom = 1
+        encode(cb, target: tex, pipeline: pipeline8, frame: f, strip: CGRect(origin: .zero, size: frame.geometry.size))
+        cb.commit()
+        cb.waitUntilCompleted()
+        if out.count != w * h * 4 { out = [UInt8](repeating: 0, count: w * h * 4) }
+        out.withUnsafeMutableBytes { tex.getBytes($0.baseAddress!, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0) }
+        // premultiplied light over the backdrop
+        backdrop.withUnsafeBufferPointer { bg in
+            out.withUnsafeMutableBufferPointer { px in
+                var i = 0
+                while i < px.count {
+                    let a = Int(px[i + 3])
+                    for c in 0..<3 { px[i + c] = UInt8(min(255, Int(px[i + c]) + Int(bg[i + c]) * (255 - a) / 255)) }
+                    px[i + 3] = 255
+                    i += 4
+                }
+            }
+        }
+    }
+    private var target: MTLTexture?
+
+    /// Render the whole screen offscreen over a flat "desktop" color, for previews.
     func renderImage(_ frame: GlowFrame, background: RGB) -> CGImage? {
         let w = Int(frame.geometry.size.width * CGFloat(frame.scale))
         let h = Int(frame.geometry.size.height * CGFloat(frame.scale))
@@ -122,7 +189,6 @@ final class GlowRenderer {
 
         var px = [UInt8](repeating: 0, count: w * h * 4)
         tex.getBytes(&px, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
-        // composite premultiplied glow over the background (in sRGB space; good enough for a preview)
         let bg = [background.r, background.g, background.b].map { $0 * 255 }
         for i in stride(from: 0, to: px.count, by: 4) {
             let a = Double(px[i + 3]) / 255
@@ -144,9 +210,11 @@ final class GlowRenderer {
         float4 screen;   // w, h, corner radius, scale
         float4 strip;    // x, y, w, h (points, top-left origin)
         float4 notch;    // x, y, w, h
-        float4 shape;    // thickness, reach, brightness, fade
-        float4 motion;   // pulse, energy, time, headroom
-        float4 c0, c1, c2;
+        float4 shape;    // edge, reach, brightness, fade
+        float4 look0;    // master, bloom, pulse, flash
+        float4 look1;    // wash level, fixtures, fixture level, alternate
+        float4 look2;    // chase position, chase width, chase level, headroom
+        float4 wash, colA, colB, chase;
     };
 
     struct VOut { float4 pos [[position]]; };
@@ -163,57 +231,75 @@ final class GlowRenderer {
         return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
     }
 
-    // haze at `e` points from a lit edge: exponential, reaching exactly zero at `r`
-    static float haze(float e, float r) {
+    // light from an edge source `e` points away: a bright, soft source at the edge, a bloom, and a faint long
+    // spill that carries the color well into the screen (so it reads as light on the screen, not a frame
+    // around it). Everything reaches zero by 1.85 r, inside the strip band (2.3 x glow).
+    static float falloff(float e, float edge, float r) {
         e = max(e, 0.0);
-        return exp(-3.0 * e / r) * (1.0 - smoothstep(0.55 * r, r, e));
+        float source = exp(-e / max(edge, 0.5));
+        float bloom = exp(-2.6 * e / r) * (1.0 - smoothstep(0.45 * r, r, e));
+        float spill = exp(-e / (0.8 * r)) * (1.0 - smoothstep(1.1 * r, 1.85 * r, e));
+        return 0.3 * source + 0.85 * bloom + 0.22 * spill;
     }
 
-    fragment float4 rim_fragment(VOut in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
-        float2 size = u.screen.xy;
-        float2 p = u.strip.xy + in.pos.xy / u.screen.w;
+    // the show at rim position u (0...1, starting bottom center, going around); both halves mirror
+    static float3 lightAt(float u, constant Uniforms& U) {
+        float m = u < 0.5 ? u * 2.0 : (1.0 - u) * 2.0;     // 0 bottom center, 1 top center
+        float3 col = U.wash.rgb * U.look1.x;
 
-        // distance to the lit boundary: the screen's rounded rect minus the notch (whose top runs off-screen,
-        // so only its bottom corners round)
-        float d = sdRoundBox(p, size * 0.5, size * 0.5, u.screen.z);
+        // fixtures: wide pools of light in two alternating colors that blend into each other (no dark gaps,
+        // which read as a dashed border); the alternate flag swaps the colors on the beat
+        float n = max(U.look1.y, 1.0);
+        float x = m * n + U.look1.w;
+        float tri = abs(fract(x * 0.5) * 2.0 - 1.0);                  // 0 at even fixture centers, 1 at odd
+        float blend = smoothstep(0.38, 0.62, tri);                     // pure pools, short soft seams
+        float pool = 0.7 + 0.3 * (0.5 + 0.5 * cos(x * 6.2831853));     // brightest at each fixture's center
+        col += mix(U.colA.rgb, U.colB.rgb, blend) * (U.look1.z * pool);
+
+        float d = m - U.look2.x;
+        float w = max(U.look2.y, 0.01);
+        col += U.chase.rgb * (U.look2.z * exp(-d * d / (w * w)));
+
+        float master = U.look0.x * (0.7 + 0.6 * U.look0.z);
+        return col * master + float3(U.look0.w);
+    }
+
+    fragment float4 rim_fragment(VOut in [[stage_in]], constant Uniforms& U [[buffer(0)]]) {
+        float W = U.screen.x, H = U.screen.y;
+        float2 p = U.strip.xy + in.pos.xy / U.screen.w;
+
+        // nothing outside the screen's rounded corners or inside the camera housing
+        float d = sdRoundBox(p, float2(W, H) * 0.5, float2(W, H) * 0.5, U.screen.z);
         float dn = 1e5;
-        if (u.notch.z > 0.0) {
-            float2 nc = float2(u.notch.x + u.notch.z * 0.5, (u.notch.y + u.notch.w - 40.0) * 0.5);
-            float2 nh = float2(u.notch.z * 0.5, (u.notch.w + 40.0) * 0.5);
-            dn = sdRoundBox(p, nc, nh, min(9.0, u.notch.z * 0.25));
-            d = max(d, -dn);
+        if (U.notch.z > 0.0) {
+            float2 nc = float2(U.notch.x + U.notch.z * 0.5, (U.notch.y + U.notch.w - 40.0) * 0.5);
+            float2 nh = float2(U.notch.z * 0.5, (U.notch.w + 40.0) * 0.5);
+            dn = sdRoundBox(p, nc, nh, min(9.0, U.notch.z * 0.25));
         }
-        float e = -d;                       // points inward from the edge
-        if (e < 0.0) return float4(0.0);
+        if (d > 0.0 || dn < 0.0) return float4(0.0);
 
-        float th = u.shape.x, reach = u.shape.y, bright = u.shape.z, fade = u.shape.w;
-        float pulse = u.motion.x, energy = u.motion.y, t = u.motion.z, headroom = u.motion.w;
+        float edge = U.shape.x, reach = U.shape.y, bright = U.shape.z, fade = U.shape.w;
+        float r = max(reach * (0.55 + 0.45 * U.look0.y + 0.2 * U.look0.z), 1.0);
+        float perim = 2.0 * (W + H);
+        float x = clamp(p.x, 0.0, W), y = clamp(p.y, 0.0, H);
 
-        float core = 1.0 - smoothstep(th * 0.55, th * 1.15, e);
-        // the haze reaches further in on a beat, and always reaches zero inside the strip band (1.6 x glow)
-        // each edge (and the notch) casts its own haze, combined like overlapping lights, so corners stay
-        // smooth instead of creasing along the diagonal
-        float r = max(reach * (1.0 + 0.5 * pulse), 1.0);
-        float dark = (1.0 - haze(p.y, r)) * (1.0 - haze(size.y - p.y, r))
-                   * (1.0 - haze(p.x, r)) * (1.0 - haze(size.x - p.x, r)) * (1.0 - haze(dn, r));
-        float halo = (1.0 - dark) * (1.0 - core);
+        // where each edge's nearest point sits on the rim (bottom center = 0, then right, top, left)
+        float uBottom = (x >= W * 0.5 ? x - W * 0.5 : 1.5 * W + 2.0 * H + x) / perim;
+        float uRight = (W * 0.5 + (H - y)) / perim;
+        float uTop = (W * 0.5 + H + (W - x)) / perim;
+        float uLeft = (1.5 * W + H + y) / perim;
 
-        float coreAmt = 0.80 + 0.15 * energy + 0.35 * pulse;
-        float haloAmt = 0.28 + 0.15 * energy + 0.55 * pulse;
-        float boost = headroom > 1.0 ? min(headroom, 1.0 + 1.6 * pulse) : 1.0;
+        float3 light = lightAt(uBottom, U) * falloff(H - p.y, edge, r)
+                     + lightAt(uRight, U) * falloff(W - p.x, edge, r)
+                     + lightAt(uTop, U) * falloff(p.y, edge, r)
+                     + lightAt(uLeft, U) * falloff(p.x, edge, r);
+        if (U.notch.z > 0.0) light += lightAt(uTop, U) * falloff(dn, edge, r);
 
-        // three colors around the rim, drifting slowly
-        float a = atan2(p.y - size.y * 0.5, p.x - size.x * 0.5) / (2.0 * M_PI_F) + 0.5;
-        float f = fract(a + t * 0.015) * 3.0;
-        int i = int(floor(f));
-        float k = smoothstep(0.0, 1.0, fract(f));
-        float3 cols[3] = { u.c0.rgb, u.c1.rgb, u.c2.rgb };
-        float3 col = mix(cols[i % 3], cols[(i + 1) % 3], k);
-        float3 coreCol = mix(col, float3(1.0), 0.18 + 0.25 * pulse);   // the line runs hotter than the haze
-
-        float lc = core * coreAmt, lh = halo * haloAmt;
-        float alpha = saturate(lc + lh) * bright * fade;
-        float3 rgb = (coreCol * lc * boost + col * lh) * bright * fade;
+        // HDR screens: hits and pulses go brighter than white
+        float headroom = U.look2.w;
+        float boost = headroom > 1.0 ? 1.0 + (headroom - 1.0) * saturate(U.look0.w + 0.5 * U.look0.z) : 1.0;
+        float3 rgb = light * bright * fade * boost;
+        float alpha = saturate(max(rgb.r, max(rgb.g, rgb.b)) * 0.6);
         return float4(rgb, alpha);
     }
     """

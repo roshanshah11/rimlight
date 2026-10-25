@@ -32,23 +32,31 @@ final class ScreenOverlay: NSObject {
     /// timed to the moment the sound was played here, not to this Mac's speakers.
     let streamed: Bool
     let geometry: RimGeometry
-    var onFrame: ((ScreenOverlay) -> Void)?
+    /// Called per refresh with the time this frame reaches the screen and how long it stays there.
+    var onFrame: ((ScreenOverlay, Double, Double) -> Void)?
     private(set) var running = false
 
     private let renderer: GlowRenderer
     private var strips: [(window: StripWindow, layer: CAMetalLayer, rect: CGRect)] = []
     private var link: CADisplayLink?
 
+    static func isStreamed(_ screen: NSScreen) -> Bool {
+        CGDisplayIsBuiltin(displayID(screen)) == 0 && screen.localizedName.lowercased().contains("imac")
+    }
+
     static func displayID(_ screen: NSScreen) -> CGDirectDisplayID {
         (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
     }
 
-    init(screen: NSScreen, settings: RimSettings, renderer: GlowRenderer) {
+    static func renderScale(_ s: RimSettings, lowMemory: Bool) -> Double { lowMemory ? 0.5 : s.renderScale }
+    private(set) var renderScale: Float = 1
+
+    init(screen: NSScreen, settings: RimSettings, renderer: GlowRenderer, lowMemory: Bool = false) {
         self.screen = screen
         self.renderer = renderer
         name = screen.localizedName
         builtIn = CGDisplayIsBuiltin(Self.displayID(screen)) != 0
-        streamed = !builtIn && name.lowercased().contains("imac")
+        streamed = Self.isStreamed(screen)
 
         let size = screen.frame.size
         var notch: CGRect?
@@ -61,7 +69,10 @@ final class ScreenOverlay: NSObject {
         geometry = RimGeometry(size: size, cornerRadius: builtIn ? 10 : 0, notch: notch)
         super.init()
 
-        let scale = screen.backingScaleFactor
+        // The glow is soft, so it's drawn at one pixel per point and scaled up: a quarter of the pixels on a Retina
+        // screen, and of the memory (each strip keeps two drawables; under memory pressure, half a pixel per point)
+        let scale = min(screen.backingScaleFactor, CGFloat(Self.renderScale(settings, lowMemory: lowMemory)))
+        renderScale = Float(scale)
         for rect in geometry.strips(band: CGFloat(settings.band)) {
             let w = StripWindow(frame: RimGeometry.windowFrame(strip: rect, screenFrame: screen.frame))
             let layer = CAMetalLayer()
@@ -86,12 +97,19 @@ final class ScreenOverlay: NSObject {
         link = l
     }
 
-    @objc private func tick(_ link: CADisplayLink) { onFrame?(self) }
+    @objc private func tick(_ link: CADisplayLink) {
+        let period = link.targetTimestamp - link.timestamp
+        onFrame?(self, link.targetTimestamp, period > 0 ? period : 1.0 / 60)
+    }
 
     func start() {
         guard !running else { return }
         running = true
-        for s in strips { s.window.orderFrontRegardless() }
+        let k = CGFloat(renderScale)
+        for s in strips {
+            s.layer.drawableSize = CGSize(width: s.rect.width * k, height: s.rect.height * k)
+            s.window.orderFrontRegardless()
+        }
         link?.isPaused = false
     }
 
@@ -99,7 +117,10 @@ final class ScreenOverlay: NSObject {
         guard running else { return }
         running = false
         link?.isPaused = true
-        for s in strips { s.window.orderOut(nil) }
+        for s in strips {
+            s.window.orderOut(nil)
+            s.layer.drawableSize = CGSize(width: 1, height: 1)   // let the idle strips' drawables go
+        }
     }
 
     func invalidate() {
@@ -110,11 +131,14 @@ final class ScreenOverlay: NSObject {
         strips = []
     }
 
+    /// How late this screen's frames land against the display link's target.
+    let presentLag = PresentLag()
+
     func render(_ frame: GlowFrame) {
-        renderer.draw(frame, into: strips.map { ($0.layer, $0.rect) })
+        renderer.draw(frame, into: strips.map { ($0.layer, $0.rect) }, lag: presentLag)
     }
 
-    var scale: Float { Float(screen.backingScaleFactor) }
+    var scale: Float { renderScale }
 
     /// Current EDR headroom: above 1 only on HDR-capable screens (the XDR panel), and only while EDR is active.
     var headroom: Float { Float(screen.maximumExtendedDynamicRangeColorComponentValue) }

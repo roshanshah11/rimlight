@@ -1,18 +1,21 @@
 import AudioToolbox
 import CoreAudio
 import Foundation
+import QuartzCore
 
-/// System audio through a Core Audio process tap (macOS 14.2+): a private, unmuted global stereo tap read via a
-/// private aggregate device built on the default output. It reads what the Mac plays; it never opens the mic.
-/// macOS asks once for "system audio recording" permission; if it is denied the tap delivers silence.
+/// The sound of the apps that are playing, through a Core Audio process tap (macOS 14.2+): a private, unmuted stereo
+/// mixdown of just those processes, read via a private aggregate device that holds only the tap. It never opens the
+/// mic. macOS asks once for "system audio recording" permission; if it is denied the tap delivers silence.
+/// The tap only runs while something plays (a running aggregate device keeps the Mac from idle-sleeping).
 final class AudioTap {
     struct Failure: Error, CustomStringConvertible {
         let step: String, status: OSStatus
         var description: String { "\(step) failed (\(status))" }
     }
 
-    /// Mono samples and their sample rate, called on the tap's own queue.
-    var onSamples: ((UnsafeBufferPointer<Float>, Double) -> Void)?
+    /// Mono samples, their sample rate, and the host time (CACurrentMediaTime seconds) of the first sample,
+    /// called on the tap's own queue.
+    var onSamples: ((UnsafeBufferPointer<Float>, Double, Double) -> Void)?
     /// Called on the main queue after the default output changes and the tap was rebuilt (or failed to).
     var onRebuild: ((Result<Void, Error>) -> Void)?
 
@@ -20,6 +23,9 @@ final class AudioTap {
     private(set) var outputLatency: Double = 0     // seconds from tap to speaker/headphones
     private(set) var outputName = "?"
     private(set) var running = false
+    /// The process objects being listened to, and their names for `rimlight status`.
+    private(set) var tapped: [AudioObjectID] = []
+    private(set) var tappedNames: [String] = []
 
     private let queue = DispatchQueue(label: "com.roshan.rimlight.audio", qos: .userInteractive)
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -28,14 +34,14 @@ final class AudioTap {
     private var mono = [Float](repeating: 0, count: 4096)
     private var listener: AudioObjectPropertyListenerBlock?
 
-    func start() throws {
+    func start(processes: [Player]) throws {
         teardown()
+        guard !processes.isEmpty else { return }
         let output = try Self.defaultOutput()
-        let outputUID = try Self.stringProperty(output, kAudioDevicePropertyDeviceUID)
         outputName = (try? Self.stringProperty(output, kAudioObjectPropertyName)) ?? "?"
         outputLatency = Self.latency(of: output)
 
-        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        let desc = CATapDescription(stereoMixdownOfProcesses: processes.map(\.id))
         desc.name = "Rimlight"
         desc.isPrivate = true
         desc.muteBehavior = .unmuted
@@ -43,19 +49,9 @@ final class AudioTap {
         try check(AudioHardwareCreateProcessTap(desc, &tap), "create process tap")
         tapID = tap
 
-        let aggregate: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "Rimlight Tap",
-            kAudioAggregateDeviceUIDKey: "com.roshan.rimlight.tap.\(UUID().uuidString)",
-            kAudioAggregateDeviceMainSubDeviceKey: outputUID,
-            kAudioAggregateDeviceIsPrivateKey: true,
-            kAudioAggregateDeviceIsStackedKey: false,
-            kAudioAggregateDeviceTapAutoStartKey: true,
-            kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: outputUID]],
-            kAudioAggregateDeviceTapListKey: [[kAudioSubTapDriftCompensationKey: true,
-                                               kAudioSubTapUIDKey: desc.uuid.uuidString]],
-        ]
         var agg = AudioObjectID(kAudioObjectUnknown)
-        try check(AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &agg), "create aggregate device")
+        try check(AudioHardwareCreateAggregateDevice(Self.aggregate(tap: desc.uuid) as CFDictionary, &agg),
+                  "create aggregate device")
         aggregateID = agg
 
         var format = AudioStreamBasicDescription()
@@ -70,13 +66,36 @@ final class AudioTap {
         sampleRate = format.mSampleRate > 0 ? format.mSampleRate : 48000
 
         var proc: AudioDeviceIOProcID?
-        try check(AudioDeviceCreateIOProcIDWithBlock(&proc, aggregateID, queue) { [weak self] _, input, _, _, _ in
-            self?.handle(input)
+        try check(AudioDeviceCreateIOProcIDWithBlock(&proc, aggregateID, queue) { [weak self] _, input, inputTime, _, _ in
+            self?.handle(input, inputTime.pointee)
         }, "create IO proc")
         procID = proc
         try check(AudioDeviceStart(aggregateID, procID), "start aggregate device")
         running = true
+        tapped = processes.map(\.id)
+        tappedNames = processes.map(\.name)
         watchDefaultOutput()
+    }
+
+    /// A private aggregate device that reads the tap. Only the tap: with the output device as a sub-device, the
+    /// aggregate (which has input, the tap) counts as recording on that device, and Bluetooth headphones drop to
+    /// headset mode (16 kHz mono) for as long as the tap runs (Beats Studio Pro, 2026-10-24). `withOutput` builds
+    /// the old shape, for `rimlight debug-tap-compare` only.
+    static func aggregate(tap: UUID, withOutput outputUID: String? = nil) -> [String: Any] {
+        var d: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "Rimlight Tap",
+            kAudioAggregateDeviceUIDKey: "com.roshan.rimlight.tap.\(UUID().uuidString)",
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceTapAutoStartKey: true,
+            kAudioAggregateDeviceTapListKey: [[kAudioSubTapDriftCompensationKey: outputUID != nil,
+                                               kAudioSubTapUIDKey: tap.uuidString]],
+        ]
+        if let outputUID {
+            d[kAudioAggregateDeviceMainSubDeviceKey] = outputUID
+            d[kAudioAggregateDeviceSubDeviceListKey] = [[kAudioSubDeviceUIDKey: outputUID]]
+        }
+        return d
     }
 
     func stop() {
@@ -101,9 +120,17 @@ final class AudioTap {
         aggregateID = AudioObjectID(kAudioObjectUnknown)
         tapID = AudioObjectID(kAudioObjectUnknown)
         running = false
+        tapped = []
+        tappedNames = []
     }
 
-    private func handle(_ input: UnsafePointer<AudioBufferList>) {
+    private static let hostSeconds: Double = {
+        var tb = mach_timebase_info_data_t()
+        mach_timebase_info(&tb)
+        return Double(tb.numer) / Double(tb.denom) / 1e9
+    }()
+
+    private func handle(_ input: UnsafePointer<AudioBufferList>, _ ts: AudioTimeStamp) {
         let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
         guard let first = list.first, first.mData != nil else { return }
         let frames: Int
@@ -130,7 +157,10 @@ final class AudioTap {
             }
         }
         guard frames > 0 else { return }
-        mono.withUnsafeBufferPointer { onSamples?(UnsafeBufferPointer(rebasing: $0[0..<frames]), sampleRate) }
+        // when the first of these samples was played (the tap's own timestamp; else estimate from now)
+        let start = ts.mFlags.contains(.hostTimeValid) ? Double(ts.mHostTime) * Self.hostSeconds
+            : CACurrentMediaTime() - Double(frames) / sampleRate
+        mono.withUnsafeBufferPointer { onSamples?(UnsafeBufferPointer(rebasing: $0[0..<frames]), sampleRate, start) }
     }
 
     /// AirPods connect, a display with speakers wakes: rebuild on the new default output.
@@ -138,7 +168,8 @@ final class AudioTap {
         guard listener == nil else { return }
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self else { return }
-            do { try self.start(); self.onRebuild?(.success(())) } catch { self.onRebuild?(.failure(error)) }
+            let players = Self.players().filter { self.tapped.contains($0.id) }
+            do { try self.start(processes: players); self.onRebuild?(.success(())) } catch { self.onRebuild?(.failure(error)) }
         }
         var addr = Self.defaultOutputAddress
         if AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &addr, .main, block) == noErr {
@@ -150,11 +181,65 @@ final class AudioTap {
         if status != noErr { throw Failure(step: step, status: status) }
     }
 
+    // MARK: who is playing
+
+    struct Player: Equatable {
+        let id: AudioObjectID
+        let pid: pid_t
+        let name: String
+    }
+
+    /// Never listened to: this app, and the iMac stream (it re-plays other apps' sound).
+    static let ignored: Set<String> = ["Rimlight", "imac-stream"]
+
+    /// Processes playing sound right now. A process that is also recording (dictation, calls, screen and stream
+    /// recorders) doesn't count: it isn't music.
+    static func players() -> [Player] {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList,
+                                              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        let sys = AudioObjectID(kAudioObjectSystemObject)
+        guard AudioObjectGetPropertyDataSize(sys, &addr, 0, nil, &size) == noErr, size > 0 else { return [] }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(sys, &addr, 0, nil, &size, &ids) == noErr else { return [] }
+        let me = getpid()
+        return ids.compactMap { id -> Player? in
+            guard u32(id, kAudioProcessPropertyIsRunningOutput, kAudioObjectPropertyScopeGlobal) != 0,
+                  u32(id, kAudioProcessPropertyIsRunningInput, kAudioObjectPropertyScopeGlobal) == 0 else { return nil }
+            var pid: pid_t = 0
+            var a = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyPID, mScope: kAudioObjectPropertyScopeGlobal,
+                                               mElement: kAudioObjectPropertyElementMain)
+            var sz = UInt32(MemoryLayout<pid_t>.size)
+            guard AudioObjectGetPropertyData(id, &a, 0, nil, &sz, &pid) == noErr, pid != me else { return nil }
+            let name = processName(pid)
+            return ignored.contains(name) ? nil : Player(id: id, pid: pid, name: name)
+        }
+    }
+
+    /// The app's name for a helper ("Comet Helper (Renderer)" -> "Comet"), else the executable's.
+    private static func processName(_ pid: pid_t) -> String {
+        var buf = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 else { return "pid \(pid)" }
+        let path = String(cString: buf)
+        if let r = path.range(of: ".app/") {
+            return String(path[..<r.lowerBound].split(separator: "/").last ?? "")
+        }
+        return String(path.split(separator: "/").last ?? "")
+    }
+
     // MARK: device properties
 
     private static var defaultOutputAddress = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyDefaultOutputDevice,
         mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+
+    static func isBluetooth(_ dev: AudioObjectID) -> Bool {
+        var a = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType, mScope: kAudioObjectPropertyScopeGlobal,
+                                           mElement: kAudioObjectPropertyElementMain)
+        var t: UInt32 = 0, s = UInt32(4)
+        guard AudioObjectGetPropertyData(dev, &a, 0, nil, &s, &t) == noErr else { return false }
+        return t == kAudioDeviceTransportTypeBluetooth || t == kAudioDeviceTransportTypeBluetoothLE
+    }
 
     static func defaultOutput() throws -> AudioObjectID {
         var id = AudioObjectID(kAudioObjectUnknown)
@@ -181,6 +266,16 @@ final class AudioTap {
         var v: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
         return AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, &v) == noErr ? v : 0
+    }
+
+    /// One IO buffer of the output, seconds: the tap hears a sample this long before its output timestamp.
+    static func bufferSeconds(of device: AudioObjectID) -> Double {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate,
+                                              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var sr: Float64 = 48000
+        var size = UInt32(MemoryLayout<Float64>.size)
+        _ = AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &sr)
+        return sr > 0 ? Double(u32(device, kAudioDevicePropertyBufferFrameSize)) / sr : 0
     }
 
     /// Device + safety offset + buffer + stream latency, in seconds. Bluetooth drivers tend to under-report, so a

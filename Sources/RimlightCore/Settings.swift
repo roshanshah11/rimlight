@@ -11,16 +11,23 @@ public struct RimSettings: Codable, Equatable, Sendable {
     public var customColors = ["#8B5CFF", "#2E9BFF", "#FF5CB8"]
     public var brightness = 0.85        // 0...1
     public var thickness = 5.0          // points, core line
-    public var glow = 48.0              // points, halo spread
-    public var reactivity = 0.7         // 0...1, how hard beats hit
+    public var glow = 100.0             // points, how far the light blooms in
+    public var reactivity = 0.9         // 0...1, how hard beats hit
     public var hdr = true               // brighter-than-white beat peaks on XDR screens
     public var wrapNotch = true
-    public var lyrics = true
+    public var lyrics = false           // off: Spicy Lyrics already shows them full screen
     public var lyricsDisplay = "auto"   // display name, or "auto" (the external screen if there is one)
     public var disabledDisplays: [String] = []
     public var syncOffsetMs = 0.0       // + delays the light, - makes it earlier
-    public var streamedFPS = 30.0       // cap for virtual / streamed displays
+    public var streamedFPS = 60.0       // cap for the streamed iMac screen (imac-stream sends up to 60)
     public var idleWhenPaused = true    // fade out when nothing plays
+    public var iMacOnly = true          // while the iMac stream is up, light only the iMac
+    public var flashes = true           // white hits on drops (never more than 3 a second)
+    /// Per output device (its Core Audio UID), ms added to the light's wait, from `rimlight calibrate`: macOS's
+    /// reported latency for Bluetooth headphones can be tens of ms off what reaches the ears.
+    public var deviceOffsets: [String: Double] = [:]
+    /// Pixels per point the glow is drawn at (it's scaled up to the screen; 2 = a Retina screen's own resolution).
+    public var renderScale = 1.0
 
     public init() {}
 
@@ -45,20 +52,26 @@ public struct RimSettings: Codable, Equatable, Sendable {
         syncOffsetMs = v(.syncOffsetMs, d.syncOffsetMs)
         streamedFPS = v(.streamedFPS, d.streamedFPS)
         idleWhenPaused = v(.idleWhenPaused, d.idleWhenPaused)
+        iMacOnly = v(.iMacOnly, d.iMacOnly)
+        flashes = v(.flashes, d.flashes)
+        deviceOffsets = v(.deviceOffsets, d.deviceOffsets)
+        renderScale = v(.renderScale, d.renderScale)
         clamp()
     }
 
     public mutating func clamp() {
         brightness = min(1, max(0, brightness))
         thickness = min(30, max(1, thickness))
-        glow = min(200, max(0, glow))
+        glow = min(240, max(0, glow))
         reactivity = min(1, max(0, reactivity))
         syncOffsetMs = min(500, max(-500, syncOffsetMs))
         streamedFPS = min(120, max(10, streamedFPS))
+        deviceOffsets = deviceOffsets.mapValues { min(400, max(-400, $0)) }
+        renderScale = min(2, max(0.25, renderScale))
     }
 
     /// The strip band: wide enough for the core line plus the visible part of the halo.
-    public var band: Double { thickness + glow * 1.6 + 4 }
+    public var band: Double { thickness + glow * 2.3 + 4 }
 
     public static var directory: URL {
         FileManager.default.homeDirectoryForCurrentUser

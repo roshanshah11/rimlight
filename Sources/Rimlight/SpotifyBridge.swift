@@ -35,9 +35,11 @@ final class SpotifyBridge {
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
         params.requiredInterfaceType = .loopback
+        // bind to 127.0.0.1 itself, not every interface (lsof showed *:47811 with the interface rule alone)
+        params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: BridgeMessage.port)!)
         params.defaultProtocolStack.applicationProtocols.insert(ws, at: 0)
         do {
-            let l = try NWListener(using: params, on: NWEndpoint.Port(rawValue: BridgeMessage.port)!)
+            let l = try NWListener(using: params)
             l.newConnectionHandler = { [weak self] c in self?.accept(c) }
             l.stateUpdateHandler = { [weak self] state in
                 if case .failed = state {

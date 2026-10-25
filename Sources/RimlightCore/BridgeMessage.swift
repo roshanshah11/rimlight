@@ -6,7 +6,10 @@ public enum BridgeMessage: Equatable, Sendable {
     case track(Track)
     case state(paused: Bool, progressMs: Double, sentAt: Double)
     case lyrics(uri: String, synced: Bool, lines: [LyricLine])
-    case analysis(uri: String, tempo: Double, beats: [Double], confidence: [Float], bars: [Double])
+    /// Spotify's audio analysis: beats (with confidence), bar starts, and when the bridge sends them, sections
+    /// (start, duration, loudness dB) and each beat's loudness (dB, its loudest segment).
+    case analysis(uri: String, tempo: Double, beats: [Double], confidence: [Float], bars: [Double],
+                  sections: [SongAnalysis.SongSection] = [], loudness: [Double] = [])
     case unavailable(kind: String, uri: String)
 
     public struct Track: Codable, Equatable, Sendable {
@@ -39,6 +42,8 @@ public enum BridgeMessage: Equatable, Sendable {
         var tempo: Double?
         var beats: [[Double]]?
         var bars: [Double]?
+        var sections: [[Double]]?
+        var loudness: [Double]?
         var kind: String?
     }
 
@@ -56,8 +61,10 @@ public enum BridgeMessage: Equatable, Sendable {
         case "analysis":
             guard let uri = e.uri, let beats = e.beats else { return nil }
             let pairs = beats.filter { !$0.isEmpty }
+            let secs = (e.sections ?? []).filter { $0.count >= 3 }.map { SongAnalysis.SongSection(start: $0[0], duration: $0[1], loudness: $0[2]) }
             return .analysis(uri: uri, tempo: e.tempo ?? 0, beats: pairs.map { $0[0] },
-                             confidence: pairs.map { $0.count > 1 ? Float($0[1]) : 1 }, bars: e.bars ?? [])
+                             confidence: pairs.map { $0.count > 1 ? Float($0[1]) : 1 }, bars: e.bars ?? [],
+                             sections: secs, loudness: e.loudness ?? [])
         case "unavailable":
             return .unavailable(kind: e.kind ?? "", uri: e.uri ?? "")
         default: return nil
