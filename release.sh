@@ -50,6 +50,29 @@ swift build -c release --arch arm64 --arch x86_64 --product Rimlight
 BIN="$(swift build -c release --arch arm64 --arch x86_64 --product Rimlight --show-bin-path)/Rimlight"
 lipo "$BIN" -verify_arch arm64 && lipo "$BIN" -verify_arch x86_64
 
+# notarize FILE: submit it, then wait for Apple's answer, riding out a dropped connection (a wait that loses the
+# network fails while Apple keeps working); fails unless Apple accepts it, printing Apple's log.
+notarize() {
+  SUB=$(xcrun notarytool submit "$1" --keychain-profile "$PROFILE" --output-format json | plutil -extract id raw -o - -)
+  echo "notarizing $(basename "$1"): submission $SUB"
+  n=0
+  while :; do
+    xcrun notarytool wait "$SUB" --keychain-profile "$PROFILE" --timeout 1h >/dev/null 2>&1 || true
+    ST=$(xcrun notarytool info "$SUB" --keychain-profile "$PROFILE" --output-format json 2>/dev/null | plutil -extract status raw -o - - 2>/dev/null || true)
+    [ -n "$ST" ] && [ "$ST" != "In Progress" ] && break
+    n=$((n + 1)); [ $n -ge 20 ] && { echo "notary: no answer after $n tries"; return 1; }
+    sleep 30
+  done
+  echo "notary: $ST"
+  [ "$ST" = "Accepted" ] || { xcrun notarytool log "$SUB" --keychain-profile "$PROFILE"; return 1; }
+}
+
+# retry N COMMAND...: for steps that only need the network to be up (stapling fetches the ticket)
+retry() {
+  n=$1; shift
+  i=1; until "$@"; do [ $i -ge "$n" ] && return 1; i=$((i + 1)); sleep 20; done
+}
+
 mkdir -p "$DIST"
 scripts/bundle.sh "$BIN" "$APP"
 if [ $LOCAL = 1 ]; then
@@ -63,9 +86,9 @@ if [ $LOCAL = 0 ]; then
   # the app first, so a copy dragged out of the DMG carries its own ticket
   ZIP="$DIST/Rimlight-notarize.zip"
   ditto -c -k --keepParent "$APP" "$ZIP"
-  xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --wait
+  notarize "$ZIP"
   rm -f "$ZIP"
-  xcrun stapler staple "$APP"
+  retry 5 xcrun stapler staple "$APP"
 fi
 
 STAGE="$(mktemp -d)"
@@ -77,8 +100,8 @@ rm -rf "$STAGE"
 
 if [ $LOCAL = 0 ]; then
   codesign --force --timestamp -s "$ID" "$DMG"
-  xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait
-  xcrun stapler staple "$DMG"
+  notarize "$DMG"
+  retry 5 xcrun stapler staple "$DMG"
   spctl -a -t exec -vv "$APP"
   spctl -a -t open --context context:primary-signature -vv "$DMG"
 fi
@@ -91,8 +114,8 @@ if [ $PUBLISH = 1 ]; then
   NOTES="$(mktemp)"
   awk -v v="## $VERSION" '$0 ~ "^## " { on = index($0, v) == 1; next } on' CHANGELOG.md > "$NOTES"
   git tag -a "v$VERSION" -m "Rimlight $VERSION"
-  git push origin "v$VERSION"
-  gh release create "v$VERSION" "$DMG" --title "Rimlight $VERSION" --notes-file "$NOTES" --verify-tag
+  retry 5 git push origin "v$VERSION"
+  retry 3 gh release create "v$VERSION" "$DMG" --title "Rimlight $VERSION" --notes-file "$NOTES" --verify-tag
   rm -f "$NOTES"
 fi
 [ $LOCAL = 1 ] && echo "(local test build: signed with this Mac's own identity, not notarized)"
